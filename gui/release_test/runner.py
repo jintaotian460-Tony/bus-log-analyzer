@@ -37,6 +37,7 @@ from gui.release_test import SCENARIO_FLAG, timing
 from gui.release_test.driver import LOAD_TIMEOUT
 from gui.release_test.plan import build_scenarios, find_measurements, select
 from gui.release_test.report import Run, anonymise, crash_log_session, files_list, judge, render
+from startup_support import require_native_window
 
 APP_EXE = 'BusLogAnalyzer.exe'
 MEMCHECK_EXE = 'appdebugger.exe'          # named in BusLogAnalyzer.spec
@@ -257,6 +258,7 @@ def run(argv: list[str], app_name: str, app_version: str) -> int:
     app.setApplicationVersion(app_version)
     window = RunnerWindow(f'{app_name} {app_version} — release test')
     window.show()
+    require_native_window(window, app.platformName(), 'release test runner')
 
     folder = args.folder.resolve()
     measurements = find_measurements(folder) if folder.is_dir() else []

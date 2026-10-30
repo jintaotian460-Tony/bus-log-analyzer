@@ -9,20 +9,42 @@ from __future__ import annotations
 import sys
 from pathlib import Path
 
-from PySide6.QtGui import QIcon
-from PySide6.QtWidgets import QApplication
-
 APP_NAME    = "Osvanta Bus Log Analyzer"
-APP_VERSION = "v00.02.02"
+APP_VERSION = "v00.02.02+tony.1"
 
 
-def main() -> int:
+def main(*, notify_startup_errors: bool = True) -> int:
+    from startup_support import STARTUP_FAILED, report_failure, windows_startup_check, write_report
+    checking = '--check-startup' in sys.argv
+    automated = ('--release-test-scenario' in sys.argv or
+                 ('--release-test' in sys.argv and '--quit-when-done' in sys.argv))
+    try:
+        if checking:
+            import json
+            result = windows_startup_check()
+            result.update(app=APP_NAME, version=APP_VERSION, check_only=True)
+            path = write_report(result)
+            result['report_path'] = str(path) if path else None
+            if sys.stdout is not None:
+                print(json.dumps(result, ensure_ascii=False), flush=True)
+            return 0 if result['available'] else STARTUP_FAILED
+        return _start_application()
+    except Exception as error:
+        report_failure(error, APP_NAME, APP_VERSION,
+                       notify=notify_startup_errors and not checking and not automated)
+        return STARTUP_FAILED
+
+
+def _start_application() -> int:
+    from startup_support import require_native_window
     # Hidden: "--release-test <folder>" tests this build instead of starting
     # it, and restarts it once per scenario. See gui/release_test.
     from gui import release_test
     if release_test.requested(sys.argv):
         return release_test.run(sys.argv, APP_NAME, APP_VERSION)
 
+    from PySide6.QtGui import QIcon
+    from PySide6.QtWidgets import QApplication
     app = QApplication(sys.argv)
     app.setApplicationName(APP_NAME)
     app.setApplicationVersion(APP_VERSION)
@@ -62,6 +84,7 @@ def main() -> int:
     from gui.splash import SplashScreen
     splash = SplashScreen(version=APP_VERSION)
     splash.show()
+    require_native_window(splash, app.platformName(), 'startup screen')
     app.processEvents()
 
     splash.set_status('Loading UI components...')
@@ -71,6 +94,8 @@ def main() -> int:
     window = MainWindow(app_name=APP_NAME, version=APP_VERSION, splash=splash)
 
     window.show()
+    require_native_window(window, app.platformName(), 'main')
+    app_log.write(f'{APP_NAME} {APP_VERSION} started: main window ready.\n')
     splash.finish(window)
     driver = release_test.drive_if_requested(window, sys.argv)  # noqa: F841 — alive until exit
     return app.exec()

@@ -355,7 +355,7 @@ class MainWindow(QMainWindow):
         else:
             install_shortcut(self)
 
-        self._log(f'{self.app_name} {self.version} started.')
+        self._log(f'{self.app_name} {self.version}: UI initialised.')
         if app_log.log_path() is not None:
             self._log(f'App log file: {app_log.log_path()}')
         self._update_measurement_tab()

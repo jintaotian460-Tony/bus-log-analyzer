@@ -76,7 +76,9 @@ def test_without_a_console_the_application_writes_its_output_here(tmp_path):
     session = _session(log.read_text(encoding='utf-8'))
     assert re.match(r'\S+ \S+  Osvanta Bus Log Analyzer v\S+  pid \d+ ====\n', session)
     # The Log panel's lines.
-    assert re.search(rf'^{STAMP}Osvanta Bus Log Analyzer v\S+ started\.$', session, re.M)
+    assert re.search(rf'^{STAMP}Osvanta Bus Log Analyzer v\S+: UI initialised\.$', session, re.M)
+    assert re.search(rf'^{STAMP}Osvanta Bus Log Analyzer v\S+ started: main window ready\.$', session, re.M)
+    assert session.index('UI initialised.') < session.index('started: main window ready.')
     assert f'App log file: {log}' in session
     # What a console would have shown.
     assert re.search(rf'^{STAMP}printed by the application$', session, re.M)

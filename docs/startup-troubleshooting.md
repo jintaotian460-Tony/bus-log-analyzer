@@ -30,3 +30,8 @@ Reference: [Microsoft: About Atom Tables](https://learn.microsoft.com/en-us/wind
 
 An offscreen test does not validate a visible Windows window. Verify a native
 start separately before treating a new build as ready for desktop use.
+
+The portable-build check also verifies imported symbols in bundled Qt/ICU
+DLLs. It refuses a same-named library with an incompatible ABI, such as a
+Conda/Poppler `icuuc.dll` found on the build machine's `PATH`. Rebuild in a
+clean environment rather than copying Windows system DLLs into the package.

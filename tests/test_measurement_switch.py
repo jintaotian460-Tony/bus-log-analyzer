@@ -149,7 +149,7 @@ def test_opening_new_measurement_clears_stale_state_and_uses_plot_message(
     qapp.processEvents()
 
 
-def test_load_decode_restores_plot_handoff_and_skips_missing_signals(
+def test_load_decode_restores_plot_handoff_and_keeps_missing_signals(
     qapp, monkeypatch, tmp_path
 ):
     new_measurement = tmp_path / "new.csv"
@@ -191,7 +191,7 @@ def test_load_decode_restores_plot_handoff_and_skips_missing_signals(
     assert window._thread.was_started
     window._on_worker_finished(_store("OldSignal"))
 
-    assert window.plot_panel.plotted_keys() == [kept.key]
+    assert window.plot_panel.plotted_keys() == [kept.key, missing.key]
     restored = window.plot_panel._items[kept.key]
     assert restored.color == "#123456"
     assert restored.visible is False
@@ -201,7 +201,8 @@ def test_load_decode_restores_plot_handoff_and_skips_missing_signals(
     assert window.btn_multi_axis.isChecked()
     assert not window.btn_stacked.isChecked()
     assert window._temporary_plot_handoff is None
-    assert any(f"Signal not found: {missing.key}" in message for message in messages)
+    assert window.plot_panel._items[missing.key].unavailable_reason == '本日志未匹配'
+    assert not len(window.plot_panel._items[missing.key].series.values)
 
     window._cleanup_worker()
     window.close()

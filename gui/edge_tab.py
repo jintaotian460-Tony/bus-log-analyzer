@@ -4,110 +4,116 @@
 #
 # Copyright (c) 2025-2026 Dinakaran Ganesan
 
-"""
-A small flat handle on the edge of a side panel that shows or hides it.
+"""A one-pixel divider with a transparent, wider mouse target.
 
-It is painted from the window's own colours whenever it is drawn, so it
-follows a switch between light and dark mode, and it is thin enough to sit
-in the gap beside the panel without covering what lies around it. A chevron
-points the way the panel will move.
+The divider overlays the boundary instead of reserving an empty strip. Drag
+coordinates are global so resizing the widget under the mouse cannot feed back
+into the next movement. A single click does nothing; double-click is separate
+from dragging and can be connected to a panel's visibility toggle.
 """
 from __future__ import annotations
 
-from PySide6.QtCore import QPointF, QRectF, Qt
+from PySide6.QtCore import Qt, Signal
 from PySide6.QtGui import QColor, QPainter, QPalette, QPen
-from PySide6.QtWidgets import QAbstractButton, QWidget
+from PySide6.QtWidgets import QApplication, QWidget
 
 
 def _mix(base: QColor, toward: QColor, amount: float) -> QColor:
-    """base moved amount (0..1) of the way toward toward."""
+    """Colour interpolation also used by the plot panel's theme controls."""
     return QColor(
-        round(base.red() + (toward.red() - base.red()) * amount),
-        round(base.green() + (toward.green() - base.green()) * amount),
-        round(base.blue() + (toward.blue() - base.blue()) * amount),
+        round(base.red() + (toward.red()-base.red())*amount),
+        round(base.green() + (toward.green()-base.green())*amount),
+        round(base.blue() + (toward.blue()-base.blue())*amount),
     )
 
 
-class EdgeTab(QAbstractButton):
-    """A handle that lies along a panel's edge: horizontal along a top or
-    bottom edge, vertical along a left or right edge."""
+class EdgeTab(QWidget):
+    THICKNESS = 7  # mouse target, not the painted line's width
+    dragStarted = Signal()
+    dragged = Signal(float)
+    dragFinished = Signal()
+    doubleClicked = Signal()
 
-    THICKNESS = 10   # across the edge
-    LENGTH = 40      # along the edge
-
-    # How far each colour lies from the window colour toward its text colour.
-    _FILL = 0.06
-    _FILL_HOVER = 0.14
-    _FILL_DOWN = 0.22
-    _BORDER = 0.28
-    _CHEVRON = 0.7
-
-    def __init__(self, orientation: Qt.Orientation, parent: QWidget | None = None) -> None:
+    def __init__(self, orientation: Qt.Orientation, parent: QWidget | None = None):
         super().__init__(parent)
         self._orientation = orientation
-        self._arrow = (Qt.ArrowType.DownArrow if orientation == Qt.Orientation.Horizontal
-                       else Qt.ArrowType.LeftArrow)
-        if orientation == Qt.Orientation.Horizontal:
-            self.setFixedSize(self.LENGTH, self.THICKNESS)
-        else:
-            self.setFixedSize(self.THICKNESS, self.LENGTH)
+        self._origin = None
+        self._dragging = False
+        self._line_offset = None
         self.setFocusPolicy(Qt.FocusPolicy.NoFocus)
-        self.setCursor(Qt.CursorShape.PointingHandCursor)
-        self.setAttribute(Qt.WidgetAttribute.WA_Hover)
+        self.setMouseTracking(True)
+        horizontal = orientation == Qt.Orientation.Horizontal
+        self.setCursor(Qt.CursorShape.SizeVerCursor if horizontal else Qt.CursorShape.SizeHorCursor)
+        self.resize(80 if horizontal else self.THICKNESS,
+                    self.THICKNESS if horizontal else 80)
 
-    def arrow(self) -> Qt.ArrowType:
-        return self._arrow
-
-    def set_arrow(self, arrow: Qt.ArrowType) -> None:
-        """Point the chevron the way the panel will move on a click."""
-        self._arrow = arrow
+    def set_line_offset(self, offset=None):
+        """Keep the line on the exact edge even if its mouse target is clipped."""
+        self._line_offset = offset
         self.update()
 
-    def colors(self) -> tuple[QColor, QColor, QColor]:
-        """Fill, border and chevron, from the current palette and state."""
-        palette = self.palette()
-        window = palette.color(QPalette.ColorRole.Window)
-        text = palette.color(QPalette.ColorRole.WindowText)
-        if self.isDown():
-            fill = self._FILL_DOWN
-        elif self.underMouse():
-            fill = self._FILL_HOVER
-        else:
-            fill = self._FILL
-        chevron = 1.0 if self.underMouse() else self._CHEVRON
-        return _mix(window, text, fill), _mix(window, text, self._BORDER), _mix(window, text, chevron)
+    def _coordinate(self, event):
+        position = event.globalPosition()
+        return position.y() if self._orientation == Qt.Orientation.Horizontal else position.x()
 
-    def enterEvent(self, event) -> None:
+    def mousePressEvent(self, event):
+        if event.button() == Qt.MouseButton.LeftButton:
+            self._origin = self._coordinate(event)
+            self._dragging = False
+            event.accept()
+        else:
+            super().mousePressEvent(event)
+
+    def mouseMoveEvent(self, event):
+        if self._origin is not None and event.buttons() & Qt.MouseButton.LeftButton:
+            delta = self._coordinate(event) - self._origin
+            if not self._dragging and abs(delta) >= QApplication.startDragDistance():
+                self._dragging = True
+                self.dragStarted.emit()
+            if self._dragging:
+                self.dragged.emit(delta)
+            event.accept()
+        else:
+            super().mouseMoveEvent(event)
+
+    def mouseReleaseEvent(self, event):
+        if event.button() == Qt.MouseButton.LeftButton:
+            dragged = self._dragging
+            self._origin = None
+            self._dragging = False
+            if dragged:
+                self.dragFinished.emit()
+            self.update()
+            event.accept()
+        else:
+            super().mouseReleaseEvent(event)
+
+    def mouseDoubleClickEvent(self, event):
+        if event.button() == Qt.MouseButton.LeftButton:
+            self._origin = None
+            self._dragging = False
+            self.doubleClicked.emit()
+            event.accept()
+        else:
+            super().mouseDoubleClickEvent(event)
+
+    def enterEvent(self, event):
         super().enterEvent(event)
         self.update()
 
-    def leaveEvent(self, event) -> None:
+    def leaveEvent(self, event):
         super().leaveEvent(event)
         self.update()
 
-    def paintEvent(self, event) -> None:
-        fill, border, chevron = self.colors()
+    def paintEvent(self, event):
+        palette = self.palette()
+        color = palette.color(QPalette.ColorRole.Highlight if self.underMouse() or self._dragging
+                              else QPalette.ColorRole.Mid)
         painter = QPainter(self)
-        painter.setRenderHint(QPainter.RenderHint.Antialiasing)
-
-        body = QRectF(self.rect()).adjusted(0.5, 0.5, -0.5, -0.5)
-        radius = min(body.width(), body.height()) / 2
-        painter.setPen(QPen(border, 1))
-        painter.setBrush(fill)
-        painter.drawRoundedRect(body, radius, radius)
-
-        pen = QPen(chevron, 1.5)
-        pen.setCapStyle(Qt.PenCapStyle.RoundCap)
-        pen.setJoinStyle(Qt.PenJoinStyle.RoundJoin)
-        painter.setPen(pen)
-        painter.setBrush(Qt.BrushStyle.NoBrush)
-        c = body.center()
-        # Four wide and two deep either side of the centre.
-        tips = {
-            Qt.ArrowType.DownArrow: ((-4, -2), (0, 2), (4, -2)),
-            Qt.ArrowType.UpArrow: ((-4, 2), (0, -2), (4, 2)),
-            Qt.ArrowType.LeftArrow: ((2, -4), (-2, 0), (2, 4)),
-            Qt.ArrowType.RightArrow: ((-2, -4), (2, 0), (-2, 4)),
-        }[self._arrow]
-        painter.drawPolyline([QPointF(c.x() + dx, c.y() + dy) for dx, dy in tips])
-        painter.end()
+        painter.setPen(QPen(QColor(color), 1))
+        if self._orientation == Qt.Orientation.Horizontal:
+            y = round(self._line_offset if self._line_offset is not None else self.height() // 2)
+            painter.drawLine(0, y, self.width()-1, y)
+        else:
+            x = round(self._line_offset if self._line_offset is not None else self.width() // 2)
+            painter.drawLine(x, 0, x, self.height()-1)

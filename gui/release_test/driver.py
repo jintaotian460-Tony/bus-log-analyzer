@@ -34,7 +34,7 @@ import weakref
 from pathlib import Path
 
 from PySide6.QtCore import QObject, QTimer
-from PySide6.QtWidgets import QApplication, QFileDialog, QMessageBox
+from PySide6.QtWidgets import QApplication, QFileDialog, QMessageBox, QInputDialog
 from shiboken6 import Shiboken
 
 from core.bus_types import decode_key
@@ -65,6 +65,9 @@ class ScenarioDriver(QObject):
         self._actions = window._toolbar_actions
         self._files: list[dict] = spec['files']
         self._steps: list[dict] = spec['steps']
+        self._inheritance_files = spec.get('inheritance_files', [])
+        self._detail_file = spec.get('detail_file')
+        self._template_answers = []
         self._result_path = Path(spec['result'])
         # The driver starts right after the main window is shown. Start-up
         # times are these stamps less the runner's launch time: both read
@@ -118,6 +121,12 @@ class ScenarioDriver(QObject):
             next(self._script)
         except StopIteration:
             self._stop()
+        except Exception:
+            import traceback
+            self._result['error'] = traceback.format_exc()
+            self._save()
+            self._stop()
+            self._window.close()
         finally:
             self._stepping = False
 
@@ -150,9 +159,15 @@ class ScenarioDriver(QObject):
         self._modal_address = 0
         self._dialog_ms += (time.perf_counter() - self._modal_shown_at) * 1000
         self._dialogs.append(dialog.windowTitle() or type(dialog).__name__)
-        if isinstance(dialog, DBCManagerDialog):
+        if isinstance(dialog, QInputDialog) and self._template_answers:
+            dialog.setTextValue(self._template_answers.pop(0))
+            dialog.accept()
+        elif isinstance(dialog, DBCManagerDialog):
             dialog.accept()
         elif isinstance(dialog, QMessageBox):
+            if dialog.windowTitle() in {'删除模板', '覆盖模板'}:
+                dialog.button(QMessageBox.StandardButton.Yes).click()
+                return
             buttons = {dialog.buttonRole(button): button for button in dialog.buttons()}
             role = next((role for role in _ANSWER_ROLES if role in buttons), None)
             if role is None:
@@ -186,6 +201,22 @@ class ScenarioDriver(QObject):
                 yield from self._plot(record)
             elif step['op'] == 'plot_stacked':
                 self._plot_stacked(record)
+            elif step['op'] == 'playback':
+                yield from self._playback(record)
+            elif step['op'] == 'panels':
+                self._panels(record)
+            elif step['op'] == 'explorer_hidden_load':
+                yield from self._explorer_hidden_load(record)
+            elif step['op'] == 'signal_window_controls':
+                yield from self._signal_window_controls(record)
+            elif step['op'] == 'signal_inheritance':
+                yield from self._signal_inheritance(record)
+            elif step['op'] == 'plot_detail':
+                yield from self._plot_detail(record)
+            elif step['op'] == 'window_templates':
+                yield from self._window_templates(record)
+            elif step['op'] == 'compact_layout':
+                yield from self._compact_layout(record)
             elif step['op'] == 'close_during_load':
                 yield from self._close_during_load(record)
                 return
@@ -330,6 +361,563 @@ class ScenarioDriver(QObject):
                 yield from self._wait(0.2)
         window.btn_clear_plot.click()
         record['outcome'] = 'plotted'
+
+    def _playback(self, record: dict):
+        """Exercise the packaged timer, cursor readouts and a real data gap."""
+        from core.playback import data_gaps
+        window = self._window
+        if window.store is None:
+            record['outcome'] = 'nothing to play'
+            return
+        keys = window.store.all_keys()
+        can_key = next((k for k in keys if k.startswith('CH')), keys[0])
+        lin_key = next((k for k in keys if 'ACT7ual_position' in k), keys[-1])
+        window.add_signals_to_plot([can_key, lin_key])
+        window.playback.apply_config(dict(window.playback.to_config(), gap_timeout=2))
+        start = window.playback.clock.start + 1
+        window.playback.seek(start)
+        window.playback.toggle()
+        yield from self._wait(0.4)
+        window.playback.pause()
+        record['timer_advanced'] = window.playback.clock.position > start + 0.15
+        record['cursor_synchronised'] = abs(window.plot_panel.v_line.value()-window.playback.clock.position) < 1e-6
+        record['time_mode'] = window.playback.time_mode.currentData() if hasattr(window.playback, 'time_mode') else window.playback.to_config()['time_mode']
+        series = window.store.get_series(lin_key)
+        gaps = data_gaps(series.timestamps, window.playback.to_config()['gap_timeout'])
+        if gaps:
+            gap = max(gaps, key=lambda interval: interval[1]-interval[0])
+            window.playback.seek(sum(gap)/2)
+            row = window.plot_panel._row_lookup[lin_key]
+            record['gap_readout'] = window.plot_panel.table.item(row, 2).text().startswith('Stale')
+        record['outcome'] = 'played'
+
+    def _panels(self, record: dict):
+        window = self._window
+        window._act_explorer.setChecked(True)
+        window.left_dock.show()
+        window._act_explorer.trigger()
+        record['explorer_hidden'] = not window.left_dock.isVisible()
+        window._act_explorer.trigger()
+        record['explorer_restored'] = window.left_dock.isVisible()
+        window._act_signals.setChecked(False)
+        window.signal_dock.hide()
+        window._act_signals.trigger()
+        record['signals_floating'] = window.signal_dock.isVisible() and window.signal_dock.isFloating()
+        record['outcome'] = 'panels toggled'
+        window.grab().save(str(self._result_path.with_suffix('.png')))
+        window.signal_dock.grab().save(str(self._result_path.with_name(self._result_path.stem + '-signals.png')))
+
+    def _signal_window_controls(self, record: dict):
+        """Check the actual Win32 caption styles and its system commands."""
+        window = self._window
+        panel = window.signal_dock
+        panel.showNormal()
+        panel.raise_()
+        panel.activateWindow()
+        yield from self._wait(0.3)
+        normal = panel.size()
+        native = ctypes.WinDLL('user32', use_last_error=True)
+        native.GetWindowLongW.argtypes = [ctypes.c_void_p, ctypes.c_int]
+        native.GetWindowLongW.restype = ctypes.c_long
+        native.PostMessageW.argtypes = [ctypes.c_void_p, ctypes.c_uint, ctypes.c_size_t, ctypes.c_ssize_t]
+        native.PostMessageW.restype = ctypes.c_bool
+        handle = int(panel.winId())
+        style = native.GetWindowLongW(handle, -16)
+        record['native_caption'] = (style & 0xC00000) == 0xC00000
+        record['minimize_button'] = bool(style & 0x20000)
+        record['maximize_button'] = bool(style & 0x10000)
+        record['system_menu'] = bool(style & 0x80000)
+        frame = panel.frameGeometry()
+        panel.screen().grabWindow(0, frame.x(), frame.y(), frame.width(), frame.height()).save(str(self._result_path.with_name(self._result_path.stem+'-caption.png')))
+        native.PostMessageW(handle, 0x112, 0xF020, 0)
+        yield from self._wait(0.3)
+        record['only_signal_window_minimized'] = panel.isMinimized() and not window.isMinimized()
+        window._act_signals.trigger()
+        yield from self._wait(0.3)
+        record['signals_restores_minimized_window'] = panel.isVisible() and not panel.isMinimized()
+        handle = int(panel.winId())
+        restored_style = native.GetWindowLongW(handle, -16)
+        record['buttons_after_restore'] = bool(restored_style & 0x20000) and bool(restored_style & 0x10000)
+        native.PostMessageW(handle, 0x112, 0xF030, 0)
+        yield from self._wait(0.3)
+        record['maximized'] = panel.isMaximized() and (panel.width() > normal.width() or panel.height() > normal.height())
+        handle = int(panel.winId())
+        native.PostMessageW(handle, 0x112, 0xF120, 0)
+        yield from self._wait(0.3)
+        record['restored_normal'] = not panel.isMaximized() and not panel.isMinimized()
+        handle = int(panel.winId())
+        native.PostMessageW(handle, 0x112, 0xF060, 0)
+        yield from self._wait(0.3)
+        record['close_hides_only'] = panel.isHidden() and window.isVisible()
+        window._act_signals.trigger()
+        record['signals_restores_closed_window'] = panel.isVisible()
+        record['outcome'] = 'window controls exercised'
+
+    def _explorer_hidden_load(self, record: dict):
+        """Real Qt mouse events must load once and respect a hidden tree."""
+        from PySide6.QtCore import Qt
+        from PySide6.QtTest import QTest
+        window = self._window
+        path = Path(self._current_file['path'])
+        window.signal_dock.close()
+        record['signals_hidden_before'] = window.signal_dock.isHidden()
+        window.left_dock.show()
+        explorer = window.log_explorer
+        explorer.set_root(str(path.parent))
+        tree = explorer.tree
+        deadline = time.monotonic()+15
+        index = explorer.model.index(str(path))
+        while not index.isValid() or tree.visualRect(index).isEmpty():
+            if time.monotonic() > deadline:
+                record['outcome'] = 'file row unavailable'
+                return
+            yield
+            index = explorer.model.index(str(path))
+        tree.scrollTo(index)
+        yield from self._wait(0.2)
+        point = tree.visualRect(index).center()
+        requests = []
+        request_received = requests.append
+        explorer.fileActivated.connect(request_received)
+        try:
+            QTest.mouseClick(tree.viewport(), Qt.MouseButton.LeftButton, pos=point)
+            QTest.mouseDClick(tree.viewport(), Qt.MouseButton.LeftButton, pos=point)
+            record['double_click_started_load'] = window._thread is not None
+            deadline = time.monotonic()+LOAD_TIMEOUT
+            while window._thread is not None:
+                if time.monotonic() > deadline:
+                    record['outcome'] = 'timed out'
+                    return
+                yield
+            record['load_requests'] = len(requests)
+            record['signals_still_hidden'] = window.signal_dock.isHidden()
+            record['signals'] = len(window.store.all_keys()) if window.store else 0
+            record['outcome'] = 'loaded' if window.store else 'not loaded'
+            record['saved_visibility'] = window._configuration_dict()['panels']['signals_visible']
+            window._act_signals.trigger()
+            record['signals_restored'] = window.signal_dock.isVisible()
+        finally:
+            explorer.fileActivated.disconnect(request_received)
+
+    def _signal_inheritance(self, record: dict):
+        """Exercise file replacement through actual explorer double-click events."""
+        from PySide6.QtCore import Qt
+        from PySide6.QtTest import QTest
+        window = self._window
+        window.plot_panel.clear_all()
+        window.signal_tree.select_signal_keys([])
+        explorer = window.log_explorer
+        record['switches'] = []
+        plotted_key = None
+        expected_styles = None
+        for number, path in enumerate(self._inheritance_files):
+            explorer.set_root(str(Path(path).parent))
+            window.left_dock.show()
+            index = explorer.model.index(str(Path(path)))
+            deadline = time.monotonic() + LOAD_TIMEOUT
+            while not index.isValid() or explorer.tree.visualRect(index).isEmpty():
+                if time.monotonic() > deadline:
+                    raise RuntimeError('Inheritance test row unavailable')
+                yield
+                index = explorer.model.index(str(Path(path)))
+            explorer.tree.scrollTo(index)
+            yield from self._wait(0.2)
+            point = explorer.tree.visualRect(index).center()
+            QTest.mouseClick(explorer.tree.viewport(), Qt.MouseButton.LeftButton, pos=point)
+            QTest.mouseDClick(explorer.tree.viewport(), Qt.MouseButton.LeftButton, pos=point)
+            while window._thread is not None or window._calc_thread is not None:
+                if time.monotonic() > deadline:
+                    raise RuntimeError('Inheritance load timed out')
+                yield
+            yield from self._wait(0.2)
+            if window.store is None:
+                raise RuntimeError('Inheritance load failed')
+            if number == 0:
+                plotted_key = next(k for k in window.store.all_keys() if window.store.get_series(k).signal_name == 'Speed')
+                selected_key = next(k for k in window.store.all_keys() if window.store.get_series(k).signal_name == 'Voltage')
+                window.add_signal_to_plot(plotted_key)
+                window.signal_tree.select_signal_keys([plotted_key, selected_key])
+                item = window.plot_panel._items[plotted_key]
+                item.color = '#123456'
+                item.group = 'Inherited'
+                item.own_axis = True
+                item.axis_visible = False
+                item.line_style = 'dash'
+                from gui.signal_inheritance import STYLE_FIELDS
+                expected_styles = {f: getattr(item, f) for f in STYLE_FIELDS}
+            item = window.plot_panel._items.get(plotted_key)
+            selected = window.signal_tree.selected_signal_keys()
+            switch = {'file': Path(path).name, 'plotted': window.plot_panel.plotted_keys(),
+                      'selected_count': len(selected), 'signals': len(window.store.all_keys()),
+                      'unavailable': item.unavailable_reason if item else '',
+                      'samples': len(item.series.values) if item else 0,
+                      'first_value': float(item.series.values[0]) if item and len(item.series.values) else None,
+                      'styles_preserved': bool(item) and all(getattr(item, f) == v for f, v in expected_styles.items())}
+            record['switches'].append(switch)
+            if number == 1:
+                window.signal_dock.show()
+                yield from self._wait(0.2)
+                screen = window.screen()
+                screen.grabWindow(int(window.winId())).save(str(self._result_path.with_suffix('.inheritance.png')))
+        switches = record['switches']
+        assert len(switches) == 5
+        assert switches[1]['unavailable'] == '本日志未匹配' and switches[1]['samples'] == 0
+        assert switches[1]['selected_count'] == 2 and switches[1]['styles_preserved']
+        assert not switches[2]['unavailable'] and switches[2]['first_value'] == 90
+        assert switches[2]['selected_count'] == 2 and switches[2]['styles_preserved']
+        assert not switches[3]['plotted'] and switches[3]['selected_count'] == 0
+        assert not switches[4]['plotted'] and switches[4]['selected_count'] == 0
+        record['outcome'] = 'passed'
+
+    def _plot_detail(self, record: dict):
+        from PySide6.QtCore import Qt, QPointF, QEvent
+        from PySide6.QtGui import QMouseEvent
+        from PySide6.QtTest import QTest
+        from gui.time_axis import TimeAxis
+        import numpy as np
+        window = self._window
+        window.open_measurement_path(self._detail_file, auto_decode=True)
+        deadline = time.monotonic() + LOAD_TIMEOUT
+        while window._thread is not None:
+            if time.monotonic() > deadline:
+                raise RuntimeError('Detail recording load timed out')
+            yield
+        panel = window.plot_panel
+        panel.clear_all()
+        keys = window.store.all_keys()[:4]
+        window.add_signals_to_plot(keys)
+        if window.btn_points.isChecked():
+            QTest.mouseClick(window.btn_points, Qt.MouseButton.LeftButton)
+        assert not panel._show_points
+        QTest.mouseClick(window.btn_points, Qt.MouseButton.LeftButton)
+        assert panel._show_points
+        record['layouts'] = []
+        for mode in ('normal', 'stacked', 'multi_axis', 'multistack'):
+            for button in (window.btn_stacked, window.btn_multi_axis, window.btn_multistack):
+                button.setChecked(False)
+            if mode != 'normal':
+                QTest.mouseClick(getattr(window, 'btn_' + mode), Qt.MouseButton.LeftButton)
+            QTest.mouseClick(window.btn_fit, Qt.MouseButton.LeftButton)
+            yield from self._wait(.2)
+            panel._update_adaptive_points()
+            dense_label = '稀疏显示' in panel.sampling_label.text()
+            QTest.mouseClick(window.btn_time_10ms, Qt.MouseButton.LeftButton)
+            yield from self._wait(.3)
+            panel._update_adaptive_points()
+            low, high = panel._driving_vb().viewRange()[0]
+            axis = (panel._stacked_plots[-1] if panel._stacked_mode else panel.plot.plotItem).getAxis('bottom')
+            levels = axis.tickValues(low, high, panel._driving_vb().width())
+            assert isinstance(axis, TimeAxis) and levels[1][0] == .01
+            counts = []
+            for key in keys:
+                item = panel._items[key]
+                original = np.asarray(window.store.get_series(key).timestamps)
+                shown, values = item.scatter.getData()
+                expected = (original >= low) & (original <= high)
+                assert np.array_equal(shown, original[expected])
+                assert np.array_equal(values, np.asarray(item.series.values)[expected])
+                assert '10.000 ms' in panel._sample_tooltip(item, 10)
+                counts.append(len(shown))
+            assert dense_label and '全量' in panel.sampling_label.text()
+            assert panel.sampling_label.isVisible() and panel.sampling_label.width() > 100
+            record['layouts'].append({'mode': mode, 'minor_seconds': levels[1][0],
+                                      'real_samples': True, 'visible_counts': counts, 'density_label': dense_label})
+            if mode == 'stacked':
+                window.screen().grabWindow(int(window.winId())).save(str(self._result_path.with_suffix('.detail-stacked.png')))
+                scatter = panel._items[keys[0]].scatter
+                x, y = scatter.getData()
+                scene_point = scatter.mapToScene(QPointF(float(x[5]), float(y[5])))
+                window.raise_()
+                window.activateWindow()
+                hovered = []
+                callback = lambda _scatter, points, _event: hovered.append(len(points))
+                scatter.sigHovered.connect(callback)
+                QTest.mouseMove(panel.glw.viewport(), panel.glw.mapFromScene(scene_point) - QPointF(20, 10).toPoint())
+                QTest.mouseMove(panel.glw.viewport(), panel.glw.mapFromScene(scene_point))
+                position = panel.glw.mapFromScene(scene_point)
+                event = QMouseEvent(QEvent.Type.MouseMove, QPointF(position),
+                                    QPointF(panel.glw.viewport().mapToGlobal(position)),
+                                    Qt.MouseButton.NoButton, Qt.MouseButton.NoButton, Qt.KeyboardModifier.NoModifier)
+                QApplication.sendEvent(panel.glw.viewport(), event)
+                yield from self._wait(.8)
+                tip = scatter.getViewBox().toolTip()
+                record['hover_tooltip'] = '10.000 ms' in tip
+                record['hover_text'] = tip
+                record['hover_events'] = hovered
+                record['hover_debug'] = {'hoverable': scatter.opts['hoverable'],
+                                         'points_at': len(scatter.pointsAt(QPointF(float(x[5]), float(y[5])))),
+                                         'scene_point': [scene_point.x(), scene_point.y()],
+                                         'viewport_point': [panel.glw.mapFromScene(scene_point).x(), panel.glw.mapFromScene(scene_point).y()],
+                                         'mouse_tracking': panel.glw.viewport().hasMouseTracking()}
+                scatter.sigHovered.disconnect(callback)
+        if not record.get('hover_tooltip'):
+            self._result_path.with_suffix('.hover-debug.json').write_text(json.dumps(record, indent=2), encoding='utf-8')
+        assert record.get('hover_tooltip'), 'No sampling interval tooltip on actual hover'
+        record['outcome'] = 'passed'
+
+    def _window_templates(self, record: dict):
+        from copy import deepcopy
+        from PySide6.QtCore import Qt, QPointF, QEvent
+        from PySide6.QtGui import QMouseEvent
+        from PySide6.QtTest import QTest
+        from PySide6.QtWidgets import QComboBox, QToolButton
+        from core.project_config import save_project, load_project
+        from gui import analysis_templates, plot_windows
+        window = self._window
+        window.open_measurement_path(self._detail_file, auto_decode=True)
+        deadline = time.monotonic() + LOAD_TIMEOUT
+        while window._thread is not None:
+            if time.monotonic() > deadline:
+                raise RuntimeError('Window recording load timed out')
+            yield
+        window.plot_panel.clear_all()
+        QTest.mouseClick(window.btn_windows, Qt.MouseButton.LeftButton)
+        panel = window.plot_panel
+        keys = window.store.all_keys()[:4]
+        window.add_signals_to_plot(keys[:2])
+        QTest.mouseClick(window.btn_new_window, Qt.MouseButton.LeftButton)
+        window.add_signal_to_plot(keys[2])
+        QTest.mouseClick(window.btn_new_window, Qt.MouseButton.LeftButton)
+        window.add_signal_to_plot(keys[3])
+        yield from self._wait(.3)
+        assert len(panel._window_widgets) == 3
+        assert [list(widget[1].rows) for widget in panel._window_widgets.values()] == [keys[:2], [keys[2]], [keys[3]]]
+        combo = panel._window_widgets[0][0].findChild(QComboBox)
+        combo.setCurrentIndex(1)
+        yield from self._wait(.2)
+        assert panel._items[keys[0]].view_box is not panel._items[keys[1]].view_box
+        assert panel._window_specs[1]['axis_mode'] == 'shared'
+        window.btn_cursor1.setChecked(True)
+        window.btn_cursor2.setChecked(True)
+        yield from self._wait(.2)  # cursor creation queues a range restore
+        panel._stacked_plots[1].setXRange(10, 15, padding=0)
+        yield from self._wait(.2)
+        for plot in panel._stacked_plots:
+            assert abs(plot.vb.viewRange()[0][0] - 10) < .05, [p.vb.viewRange()[0] for p in panel._stacked_plots]
+            assert abs(plot.vb.viewRange()[0][1] - 15) < .05, [p.vb.viewRange()[0] for p in panel._stacked_plots]
+        panel._stacked_c1_lines[1].setPos(12)
+        panel._stacked_c2_lines[0].setPos(13)
+        assert all(abs(line.value()-12) < 1e-8 for line in panel._stacked_c1_lines)
+        assert all(abs(line.value()-13) < 1e-8 for line in panel._stacked_c2_lines)
+        assert all(tree.rows[key].text(1) for _widget, tree, _title in panel._window_widgets.values() for key in tree.rows)
+        scrollbar = panel._stacked_scroll.verticalScrollBar()
+        scrollbar.setValue(scrollbar.maximum())
+        yield from self._wait(.2)
+        assert panel.window_ruler.isVisible()
+        scrollbar.setValue(0)
+        window.resize(1600, 1050)
+        window.bottom_dock.hide()
+        yield from self._wait(.3)
+        grip = panel._window_grips[0]
+        old_height = panel._window_heights[0]
+        before_heights = list(panel._window_heights)
+        local = QPointF(grip.rect().center())
+        global_pos = QPointF(grip.mapToGlobal(grip.rect().center())) + QPointF(0, -35)
+        QTest.mousePress(grip, Qt.MouseButton.LeftButton, pos=local.toPoint())
+        event = QMouseEvent(QEvent.Type.MouseMove, local, global_pos,
+                            Qt.MouseButton.NoButton, Qt.MouseButton.LeftButton, Qt.KeyboardModifier.NoModifier)
+        QApplication.sendEvent(grip, event)
+        QTest.mouseRelease(grip, Qt.MouseButton.LeftButton)
+        assert panel._window_heights[0] < old_height, {
+            'before': before_heights, 'after': panel._window_heights,
+            'visible': grip.isVisible(), 'geometry': grip.geometry().getRect(),
+            'viewport': panel._stacked_scroll.viewport().size().toTuple(),
+            'drag_start': getattr(grip, 'heights', None),
+        }
+        third = panel._window_widgets[2][0]
+        up = next(button for button in third.findChildren(QToolButton) if button.text() == '↑')
+        QTest.mouseClick(up, Qt.MouseButton.LeftButton)
+        yield from self._wait(.3)
+        assert panel._window_specs[1]['id'] == 2
+        profile = self._result_path.with_suffix('.project.json')
+        other_profile = self._result_path.with_suffix('.other-project.json')
+        save_project(profile, {'name': 'Native analysis project'}, {'channels': {}}, {})
+        save_project(other_profile, {'name': 'Other project'}, {'channels': {}}, {})
+        window.project = {'name': 'Native analysis project'}
+        analysis_templates.bind_profile(window, profile)
+        self._template_answers.append('电机排查')
+        window.template_menu.populate()
+        next(action for action in window.template_menu.menu_widget.actions() if action.text() == '保存当前分析为模板…').trigger()
+        saved = load_project(profile)['project']['analysis_templates']['电机排查']
+        assert 'timestamps' not in json.dumps(saved)
+        expected = deepcopy(saved['presentation']['window_layout'])
+        panel._stacked_plots[0].setXRange(11, 14, padding=0)
+        panel.move_cursor1(12)
+        panel.move_cursor2(13)
+        store, recording = window.store, window.measurement_path
+        window.btn_stacked.setChecked(True)
+        panel.clear_all()
+        window.add_signal_to_plot(keys[-1])
+        yield from self._wait(.2)
+        panel._driving_vb().setXRange(11, 14, padding=0)
+        panel.move_cursor1(12)
+        panel.move_cursor2(13)
+        window.template_menu.populate()
+        next(action for action in window.template_menu.menu_widget.actions() if action.text() == '电机排查').trigger()
+        yield from self._wait(.3)
+        assert window.store is store and window.measurement_path == recording
+        assert panel.plotted_keys() == keys
+        assert abs(panel._driving_vb().viewRange()[0][0]-11) < .05, panel._driving_vb().viewRange()[0]
+        assert abs(panel._driving_vb().viewRange()[0][1]-14) < .05, panel._driving_vb().viewRange()[0]
+        assert panel.v_line.value() == 12 and panel.v_line2.value() == 13
+        assert [(spec['id'], spec['axis_mode'], spec['height']) for spec in panel._window_specs] == [(spec['id'], spec['axis_mode'], spec['height']) for spec in expected]
+        window.screen().grabWindow(int(window.winId())).save(str(self._result_path.with_suffix('.windows.png')))
+        self._template_answers.extend(['电机排查', '重命名测试'])
+        window.template_menu.rename()
+        assert list(load_project(profile)['project']['analysis_templates']) == ['重命名测试']
+        self._template_answers.append('重命名测试')
+        window.template_menu.delete()
+        assert not load_project(profile)['project']['analysis_templates']
+        window.template_menu.persist({'电机排查': saved})
+        self._pending_paths.append(str(other_profile))
+        window.open_project()
+        assert not window.template_menu.library()
+        assert window.store is None and panel.plotted_keys() == []
+        assert '电机排查' in load_project(profile)['project']['analysis_templates']
+        record.update(outcome='passed', local_signal_lists=True, whole_window_axis_modes=True,
+                      common_time_ruler=True, synchronized_zoom=True, synchronized_cursors=True,
+                      adjustable_height=True, reorder_windows=True, template_save_apply=True,
+                      keep_time_and_cursors=True, template_rename_delete=True, project_isolation=True)
+
+    def _compact_layout(self, record: dict):
+        """Check native geometry and actual divider mouse-event handlers."""
+        from PySide6.QtCore import Qt, QPointF, QEvent
+        from PySide6.QtGui import QMouseEvent
+        from PySide6.QtTest import QTest
+        from gui import plot_windows
+        window = self._window
+        window.open_measurement_path(self._detail_file, auto_decode=True)
+        deadline = time.monotonic()+LOAD_TIMEOUT
+        while window._thread is not None:
+            if time.monotonic() > deadline:
+                raise RuntimeError('Compact layout recording load timed out')
+            yield
+        panel = window.plot_panel
+        panel.clear_all()
+        window.btn_windows.setChecked(True)
+        window.left_dock.show()
+        window.bottom_dock.show()
+        window.signal_dock.hide()
+        window.resize(1600, 1050)
+        keys = window.store.all_keys()[:4]
+        window.add_signals_to_plot(keys[:2])
+        panel.new_window()
+        window.add_signal_to_plot(keys[2])
+        panel.new_window()
+        window.add_signal_to_plot(keys[3])
+        for spec, height in zip(panel._window_specs, (160, 320, 160)):
+            spec['height'] = height
+        plot_windows.arrange(panel)
+        yield from self._wait(.3)
+
+        def tiled():
+            from PySide6.QtCore import QPoint
+            rectangles = [plot.geometry() for plot in panel._stacked_plots]
+            assert abs(rectangles[0].top()) < 1
+            assert all(abs(a.bottom()-b.top()) < .01 for a, b in zip(rectangles, rectangles[1:]))
+            assert abs(rectangles[-1].bottom()+plot_windows.RULER_HEIGHT-panel.glw.viewport().height()) <= 1
+            footer = panel._cursor_line.mapToGlobal(QPoint())
+            assert panel.window_ruler.mapToGlobal(QPoint(0, panel.window_ruler.height())).y() == footer.y()
+            tree = panel._window_widgets[panel._window_specs[-1]['id']][1]
+            if panel._stacked_scroll.verticalScrollBar().value() == panel._stacked_scroll.verticalScrollBar().maximum():
+                assert abs(tree.mapToGlobal(QPoint(0, tree.height())).y()-footer.y()) <= 1
+            assert abs(panel.window_ruler.mapToGlobal(QPoint()).x()-tree.mapToGlobal(QPoint(tree.width(), 0)).x()) <= 1
+            assert panel.window_ruler.isVisible()
+
+        def drag(widget, dx=0, dy=0):
+            local = QPointF(widget.rect().center())
+            global_pos = QPointF(widget.mapToGlobal(widget.rect().center()))
+            QTest.mousePress(widget, Qt.MouseButton.LeftButton)
+            QApplication.sendEvent(widget, QMouseEvent(QEvent.Type.MouseMove, local,
+                global_pos+QPointF(dx, dy), Qt.MouseButton.NoButton,
+                Qt.MouseButton.LeftButton, Qt.KeyboardModifier.NoModifier))
+            QTest.mouseRelease(widget, Qt.MouseButton.LeftButton)
+
+        tiled()
+        assert panel._stacked_scroll.verticalScrollBar().maximum() == 0
+        panel._driving_vb().setXRange(11, 14, padding=0)
+        panel.move_cursor1(12)
+        panel.move_cursor2(13)
+        series = {key: panel._items[key].series for key in keys}
+        before = list(panel._window_heights)
+        drag(panel._window_grips[0], dy=25)
+        yield from self._wait(.2)
+        assert panel._window_heights == [before[0]+25, before[1]-25, before[2]]
+        tiled()
+        # Resize, collapse and reopen both dock boundaries using their lines.
+        for name, delta in (('left', 35), ('bottom', -30)):
+            tab, dock = getattr(window, name+'_edge_btn'), getattr(window, name+'_dock')
+            before_extent = dock.width() if name == 'left' else dock.height()
+            drag(tab, dx=delta if name == 'left' else 0, dy=delta if name == 'bottom' else 0)
+            yield from self._wait(.2)
+            after_extent = dock.width() if name == 'left' else dock.height()
+            assert abs(after_extent-before_extent-abs(delta)) <= 2
+            tiled()
+            QTest.mouseClick(tab, Qt.MouseButton.LeftButton)
+            assert dock.isVisible()
+            QTest.mouseDClick(tab, Qt.MouseButton.LeftButton)
+            yield from self._wait(.2)
+            assert not dock.isVisible() and tab.isVisible()
+            tiled()
+            QTest.mouseDClick(tab, Qt.MouseButton.LeftButton)
+            yield from self._wait(.2)
+            assert dock.isVisible()
+            tiled()
+        central = window.centralWidget().geometry()
+        assert central.left()-window.left_dock.geometry().right()-1 <= 1
+        assert window.bottom_dock.geometry().top()-central.bottom()-1 <= 1
+        window.resize(1400, 900)
+        yield from self._wait(.3)
+        tiled()
+        for _ in range(7):
+            panel.new_window()
+        yield from self._wait(.3)
+        bar = panel._stacked_scroll.verticalScrollBar()
+        assert bar.maximum() > 0 and min(panel._window_heights) >= plot_windows.MIN_WINDOW_HEIGHT
+        bar.setValue(bar.maximum())
+        yield from self._wait(.2)
+        point = panel.glw.mapFromScene(panel._stacked_plots[-1].geometry().bottomLeft())
+        point = panel._stacked_scroll.viewport().mapFromGlobal(panel.glw.viewport().mapToGlobal(point))
+        assert abs(point.y()+plot_windows.RULER_HEIGHT-panel._stacked_scroll.viewport().height()) <= 1
+        tiled()
+        for spec in list(panel._window_specs[3:]):
+            plot_windows.close_window(panel, spec)
+        window.resize(1600, 1050)
+        yield from self._wait(.3)
+        tiled()
+        assert panel._stacked_scroll.verticalScrollBar().maximum() == 0
+        assert all(panel._items[key].series is original for key, original in series.items())
+        assert abs(panel._driving_vb().viewRange()[0][0]-11) < .05
+        assert abs(panel._driving_vb().viewRange()[0][1]-14) < .05
+        assert panel.v_line.value() == 12 and panel.v_line2.value() == 13
+        screenshot = str(self._result_path.with_suffix('.compact.png'))
+        window.screen().grabWindow(int(window.winId())).save(screenshot)
+        # Explicitly cover the two-window layout from the reported screenshot,
+        # then one window. Check pixels in the former ruler strip as well as
+        # widget geometry, so a white filler cannot masquerade as a real list.
+        from PySide6.QtCore import QPoint
+        from PySide6.QtGui import QPalette
+        footer_screenshot = str(self._result_path.with_suffix('.signal-footer.png'))
+        for count in (2, 1):
+            plot_windows.close_window(panel, panel._window_specs[-1])
+            yield from self._wait(.2)
+            assert len(panel._window_specs) == count
+            tiled()
+            tree = panel._window_widgets[panel._window_specs[-1]['id']][1]
+            footer_y = panel._cursor_line.mapToGlobal(QPoint()).y()
+            target = window.mapFromGlobal(QPoint(tree.mapToGlobal(QPoint()).x()+15, footer_y-25))
+            shot = window.grab().toImage()
+            ratio = shot.devicePixelRatio()
+            assert shot.pixelColor(round(target.x()*ratio), round(target.y()*ratio)) == tree.palette().color(QPalette.ColorRole.Base)
+            if count == 2:
+                window.screen().grabWindow(int(window.winId())).save(footer_screenshot)
+        record.update(outcome='passed', proportional_fill=True, zero_gaps=True,
+                      signal_list_to_footer=True, ruler_right_only=True,
+                      footer_window_counts=[1, 2, 3], footer_pixels_verified=True,
+                      footer_screenshot=footer_screenshot,
+                      last_window_at_ruler=True, adjacent_resize=True, readable_overflow=True,
+                      dock_dividers_resize=True, double_click_collapse=True,
+                      collapsed_edge_reopen=True, viewport_preserved=True, screenshot=screenshot)
 
     def _close_during_load(self, record: dict):
         window = self._window

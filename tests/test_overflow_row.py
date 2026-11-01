@@ -238,31 +238,32 @@ def test_plot_buttons_sit_above_the_plot_not_the_table(window):
 def test_plot_modes_come_first_then_a_gap_then_the_icon_buttons_then_clear_plot(window, qapp):
     # Wide enough for the whole row in the offscreen platform's fallback
     # font, which makes the text buttons wider than Segoe UI does.
-    window.resize(1600, 800)
+    window.resize(2100, 800)
     qapp.processEvents()
     row = window.plot_button_row
-    modes = [window.btn_multi_axis, window.btn_stacked, window.btn_multistack, window.btn_table]
+    modes = [window.btn_multi_axis, window.btn_stacked, window.btn_multistack,
+             window.btn_windows, window.btn_new_window, window.template_menu, window.btn_table]
     icons = [window.btn_fit, window.btn_fit_v, window.btn_zoom_rect, window.btn_cursor1,
-             window.btn_cursor2, window.btn_line_mode, window.btn_points, window.btn_hide_line]
+             window.btn_cursor2, window.btn_line_mode]
 
     clear = window.btn_clear_plot
 
-    assert row._buttons == modes + icons + [clear]
-    assert [b.text() for b in modes] == ['Multi-Axis', 'Stacked', 'MultiStack', 'Table']
-    assert [b.accessibleName() for b in icons + [clear]] == [
+    assert row._buttons == modes + icons + [window.btn_points, window.btn_hide_line, window.btn_time_10ms, clear]
+    assert [b.text() for b in modes] == ['Multi-Axis', 'Stacked', 'MultiStack', '多窗口', '＋窗口', '分析模板', 'Table']
+    assert [b.accessibleName() for b in icons + [window.btn_hide_line, clear]] == [
         'Fit to Window', 'Fit Vertical', 'Rectangle Zoom', 'Cursor 1', 'Cursor 2',
-        'Step Mode', 'Show Data Points', 'Hide Line', 'Clear Plot']
-    for button in icons + [clear]:
+        'Step Mode', 'Hide Line', 'Clear Plot']
+    for button in icons + [window.btn_hide_line, clear]:
         assert button.text() == ''
         assert not button.icon().isNull()
         assert button.toolTip().startswith(button.accessibleName())
         assert button.height() == window.btn_stacked.height()
-    multistack, fit = window.btn_multistack, window.btn_fit
-    assert fit.x() - (multistack.x() + multistack.width()) > 2 * row.SPACING
+    table, fit = window.btn_table, window.btn_fit
+    assert fit.x() - (table.x() + table.width()) > 2 * row.SPACING
     # Clear Plot, which empties the plot, stands apart from the view buttons.
-    hide_line = window.btn_hide_line
+    time_ticks = window.btn_time_10ms
     assert not row.overflowed_buttons()
-    assert clear.x() - (hide_line.x() + hide_line.width()) > 2 * row.SPACING
+    assert clear.x() - (time_ticks.x() + time_ticks.width()) > 2 * row.SPACING
 
 
 def test_plot_buttons_are_level_with_the_table_header(window):
@@ -337,7 +338,7 @@ def test_only_the_cursor_line_lies_under_the_plot(qapp, window):
         return top_left.y() > plot.bottom() and plot.left() <= top_left.x() <= plot.right()
 
     assert [label for label in panel.findChildren(QLabel)
-            if label.isVisible() and under_plot(label)] == [panel.cursor_label]
+             if label.isVisible() and under_plot(label)] == [panel.cursor_label, panel.sampling_label]
 
 
 def test_plotting_the_first_signal_resizes_neither_plot_nor_table(qapp, window):

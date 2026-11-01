@@ -170,9 +170,11 @@ def load_database_file(
         return db, ["LDF converted to DBC via canmatrix/ldfparser."]
 
     load_messages: list[str] = []
+    with resolved_path.open('rb') as stream:
+        load_options = {'encoding': 'utf-8-sig'} if stream.read(3) == b'\xef\xbb\xbf' else {}
     if strict_first:
         try:
-            db = cantools.database.load_file(str(resolved_path), strict=True)
+            db = cantools.database.load_file(str(resolved_path), strict=True, **load_options)
             load_messages.append("Database loaded in strict mode.")
             return db, load_messages
         except Exception as strict_exc:
@@ -183,7 +185,7 @@ def load_database_file(
             load_messages.append(f"Strict mode details: {strict_exc}")
 
     try:
-        db = cantools.database.load_file(str(resolved_path), strict=False)
+        db = cantools.database.load_file(str(resolved_path), strict=False, **load_options)
         load_messages.append("Database loaded in compatibility mode.")
         return db, load_messages
     except Exception as compatibility_exc:

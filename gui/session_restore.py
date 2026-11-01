@@ -83,8 +83,15 @@ def differs(config: dict, snapshot: dict | None) -> bool:
     if snapshot is None:
         return True
     current = as_saved(config)
+    # Qt may constrain a restored floating window to the current screen,
+    # changing its encoded geometry without a user edit. Keep that geometry
+    # in saved sessions, but do not prompt to save solely for that adjustment.
+    def comparable(key, value):
+        if key == 'panels' and isinstance(value, dict):
+            return {name: setting for name, setting in value.items() if name != 'signals_geometry'}
+        return value
     return any(
-        value != snapshot[key]
+        comparable(key, value) != comparable(key, snapshot[key])
         for key, value in current.items()
         if key not in _IGNORED_KEYS and key in snapshot
     )

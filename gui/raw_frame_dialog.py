@@ -641,12 +641,16 @@ class RawFrameDialog(QDialog):
         if on and self._follow_time is not None:
             self._follow_now()
 
-    def follow_time(self, t: float) -> None:
+    def follow_time(self, t: float, *, immediate: bool = False) -> None:
         """Cursor 1 is at *t*: show its frame (the last at or before *t*)
         once Cursor 1 rests, while following and shown."""
         self._follow_time = t
         self.cursor_label.setText(f'Cursor 1: {t:.6f} s')
-        self._follow_timer.start()
+        if immediate:
+            self._follow_timer.stop()
+            self._follow_now()
+        else:
+            self._follow_timer.start()
 
     def _follow_now(self) -> None:
         t = self._follow_time

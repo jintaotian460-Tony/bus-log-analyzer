@@ -155,8 +155,9 @@ def window(qapp, monkeypatch, tmp_path):
 
 def test_the_file_menu_has_the_new_entries(window):
     items = [a.text() for a in window.file_menu.actions() if not a.isSeparator()]
-    assert items == ['Open configuration', 'Save configuration', 'Export plotted signals',
-                     'Save decoded measurement as MF4', 'Measurement info']
+    assert items == ['Open configuration', 'Save configuration', 'Open project', 'Save project',
+                     'Project settings', 'Export plotted signals',
+                     'Save decoded measurement as MF4', 'Measurement info', 'Save playback BLF…']
     assert window.file_menu.info_action.shortcut().toString() == 'Ctrl+I'
 
 

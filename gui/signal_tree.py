@@ -9,7 +9,7 @@ from __future__ import annotations
 import re
 
 from PySide6.QtCore import QMimeData, Qt, Signal
-from PySide6.QtGui import QAction, QDrag, QKeySequence, QShortcut, QStandardItemModel
+from PySide6.QtGui import QAction, QDrag, QKeySequence, QShortcut, QStandardItemModel, QColor, QBrush
 from PySide6.QtWidgets import (
     QAbstractItemView,
     QHeaderView,
@@ -64,16 +64,19 @@ class SignalTree(QTreeWidget):
 
 class SignalTreeWidget(QWidget):
     signalActivated = Signal(list)
+    matchRequested = Signal(str)
     generatedRenameRequested = Signal(str)
     generatedEditRequested = Signal(str)
     generatedDeleteRequested = Signal(str)
     MIME_TYPE = SignalTree.MIME_TYPE
     _GENERATED_ROLE = int(Qt.ItemDataRole.UserRole) + 1
+    _UNAVAILABLE_ROLE = int(Qt.ItemDataRole.UserRole) + 2
 
     def __init__(self, parent: QWidget | None = None) -> None:
         super().__init__(parent)
         self._payload: dict[int | None, dict[str, list[str]]] = {}
         self._generated_signals: list[tuple[str, str, str]] = []
+        self._unavailable_signals = {}
         self._messages_expanded = True
 
         self.search_edit = QLineEdit()
@@ -158,6 +161,7 @@ class SignalTreeWidget(QWidget):
         self.rebuild_tree()
 
     def rebuild_tree(self) -> None:
+        selected = self.selected_signal_keys()
         self.tree.clear()
         pattern = search_pattern(self.search_edit.text())
 
@@ -186,6 +190,8 @@ class SignalTreeWidget(QWidget):
             # form for CAN, while the tree shows the friendlier "CAN 1" so a
             # measurement carrying both buses is readable.
             display_text = channel_label(channel)
+            if channel is None and message_map and all(name.startswith('CSV: ') for name in message_map):
+                display_text = 'CSV signals'
             key_prefix = store_key_prefix(channel)
             channel_item = QTreeWidgetItem([display_text])
             added_channel = False
@@ -206,6 +212,21 @@ class SignalTreeWidget(QWidget):
             if added_channel:
                 self.tree.addTopLevelItem(channel_item)
                 channel_item.setExpanded(True)
+        missing_root = QTreeWidgetItem(['继承信号 — 未匹配 / 待确认'])
+        for key, (name, reason) in self._unavailable_signals.items():
+            if pattern and not pattern.search(f'{name} {key} {reason}'):
+                continue
+            item = QTreeWidgetItem([f'{name} — {reason}'])
+            item.setData(0, Qt.ItemDataRole.UserRole, key)
+            item.setData(0, self._UNAVAILABLE_ROLE, True)
+            item.setForeground(0, QBrush(QColor('#888888')))
+            item.setToolTip(0, f'{key}\n{reason}\n右键可手动匹配到本日志信号。')
+            item.setFlags(item.flags() & ~Qt.ItemFlag.ItemIsDragEnabled)
+            missing_root.addChild(item)
+        if missing_root.childCount():
+            self.tree.addTopLevelItem(missing_root)
+            missing_root.setExpanded(True)
+        self.select_signal_keys(selected)
         # Keep the accepted initial load behaviour: channels and messages are
         # expanded after the payload is built.  A search temporarily expands
         # its matching messages; clearing it restores the user's chosen mode.
@@ -252,6 +273,9 @@ class SignalTreeWidget(QWidget):
         self.tree.viewport().update()
 
     def _on_item_double_clicked(self, item: QTreeWidgetItem, _column: int) -> None:
+        if item.data(0, self._UNAVAILABLE_ROLE):
+            self.matchRequested.emit(self._item_key(item))
+            return
         keys = self.selected_signal_keys() or [self._item_key(item)]
         keys = [key for key in keys if key]
         if keys:
@@ -275,6 +299,10 @@ class SignalTreeWidget(QWidget):
         keys: list[str],
     ) -> QMenu:
         menu = QMenu(self.tree)
+        if key in self._unavailable_signals:
+            action = menu.addAction('匹配到本日志信号…')
+            action.triggered.connect(lambda: self.matchRequested.emit(key))
+            return menu
         plot_action = QAction(f"Plot selected signal(s) ({len(keys)})", self.tree)
         plot_action.triggered.connect(lambda: self.signalActivated.emit(keys))
         menu.addAction(plot_action)
@@ -296,6 +324,20 @@ class SignalTreeWidget(QWidget):
             )
             menu.addAction(delete_action)
         return menu
+
+    def set_unavailable_signals(self, signals) -> None:
+        self._unavailable_signals = dict(signals)
+        self.rebuild_tree()
+
+    def select_signal_keys(self, keys) -> None:
+        from PySide6.QtWidgets import QTreeWidgetItemIterator
+        wanted = set(keys)
+        self.tree.clearSelection()
+        iterator = QTreeWidgetItemIterator(self.tree)
+        while iterator.value():
+            item = iterator.value()
+            item.setSelected(self._item_key(item) in wanted)
+            iterator += 1
 
     def selected_signal_keys(self) -> list[str]:
         keys: list[str] = []

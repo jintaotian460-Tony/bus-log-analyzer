@@ -66,6 +66,18 @@ def general_rows(info: FileInfo, store, channel_config) -> list[tuple[str, str]]
         if frames:
             rows.append(('Frames', f'{frames:,}'))
         rows.append(('Decoded signals', f'{len(store.all_keys()):,}'))
+        manifest = getattr(store, 'cloud_manifest', None)
+        if manifest:
+            rows.append(('Data origin', manifest['provenance']))
+            rows.append(('Source CSV', manifest['source']))
+            rows.append(('Source SHA256', manifest['source_sha256']))
+            rows.append(('Recording clock', manifest['time_mode']))
+            for binding in manifest['bindings']:
+                rows.append((f"Platform network {binding['network']} → {binding['bus']} {binding['channel']}",
+                             f"{binding['message']} / {binding['matrix']} / {binding['matrix_sha256']}"))
+        for source in getattr(store, 'csv_source_reports', []):
+            rows.append((f"CSV: {source['name']}",
+                         f"{source['signals']} signals / {source['samples']:,} samples / {source['time_basis']} time"))
     name = getattr(channel_config, 'name', '') if channel_config is not None else ''
     if name:
         rows.append(('Channel configuration', name))

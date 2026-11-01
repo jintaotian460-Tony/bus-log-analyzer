@@ -101,14 +101,25 @@ def test_the_logo_sits_at_the_right_end_of_the_status_bar(qapp):
         qapp.processEvents()
 
 
-def test_no_line_is_drawn_beside_the_logo(qapp):
+def test_no_line_is_drawn_beside_the_logo(qapp, monkeypatch):
     # Windows draws each status bar item's line at its right edge: the
     # logo's own, and the one of the item just before it, touch the logo.
+    from PySide6.QtGui import QPainter, QPixmap
     from PySide6.QtWidgets import QCommonStyle, QStyle, QStyleOption
+    from gui import brand_logo
     from gui.brand_logo import StatusBarStyle
     from gui.main_window import MainWindow
 
     framed = []
+    forwarded = []
+
+    class InstalledStyle(StatusBarStyle):
+        def drawPrimitive(self, element, option, painter, widget=None):
+            if element == QStyle.PrimitiveElement.PE_FrameStatusBarItem:
+                forwarded.append(widget)
+            super().drawPrimitive(element, option, painter, widget)
+
+    monkeypatch.setattr(brand_logo, 'StatusBarStyle', InstalledStyle)
 
     class Recording(QCommonStyle):
         def drawPrimitive(self, element, option, painter, widget=None):
@@ -127,8 +138,21 @@ def test_no_line_is_drawn_beside_the_logo(qapp):
                                 QStyleOption(), None, item)
 
         assert framed == [window.status_state_label]
-        # The status bar has that style; its items keep the application's.
-        assert isinstance(window.statusBar().style(), StatusBarStyle)
+        # A window stylesheet wraps the installed style in Qt's private
+        # QStyleSheetStyle (exposed as QCommonStyle). Check real forwarding,
+        # rather than requiring the public wrapper to be our Python type.
+        bar = window.statusBar()
+        assert bar.findChild(InstalledStyle) is not None
+        forwarded.clear()
+        pixmap = QPixmap(100, 40)
+        painter = QPainter(pixmap)
+        try:
+            for item in items:
+                bar.style().drawPrimitive(QStyle.PrimitiveElement.PE_FrameStatusBarItem,
+                                          QStyleOption(), painter, item)
+        finally:
+            painter.end()
+        assert forwarded == list(items)
         assert not isinstance(window.status_state_label.style(), StatusBarStyle)
         assert not isinstance(window.brand_logo.style(), StatusBarStyle)
     finally:

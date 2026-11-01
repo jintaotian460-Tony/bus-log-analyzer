@@ -328,9 +328,14 @@ class LoadWorker(QObject):
         self,
         measurement_path: str | Path,
         channel_config: ChannelConfig | str | Path | None = None,
+        csv_sources: list[dict] | None = None,
+        cloud_import: dict | None = None,
     ) -> None:
         super().__init__()
         self._measurement_path = str(measurement_path)
+        import copy
+        self._csv_sources = copy.deepcopy(csv_sources or [])
+        self._cloud_import = copy.deepcopy(cloud_import or {})
 
         # Accept ChannelConfig directly or legacy single-DBC path string
         if isinstance(channel_config, ChannelConfig):
@@ -352,9 +357,20 @@ class LoadWorker(QObject):
         t_start = time.perf_counter()
         try:
             self.progress.emit("Initialising reader...")
-            reader: MeasurementReader = reader_factory(
-                self._measurement_path, self._dbc_path
-            )
+            from core.cloud_blf import is_cloud_csv, convert_csv, read_metadata, embedded_channels, attach_metadata
+            source_path = self._measurement_path
+            if self._cloud_import and is_cloud_csv(source_path):
+                self._measurement_path = convert_csv(source_path, self._cloud_import, progress=self.progress.emit)
+                self.progress.emit(f'Generated single-file BLF: {self._measurement_path}')
+            manifest, cloud_samples = read_metadata(self._measurement_path) if Path(self._measurement_path).suffix.lower() == '.blf' else (None, [])
+            if manifest:
+                self._channel_config = embedded_channels(manifest)
+                self._dbc_path = self._channel_config.all_dbc_paths()[0]
+            if manifest and not manifest['frame_count']:
+                from types import SimpleNamespace
+                reader = SimpleNamespace(source_description='Cloud BLF physical observations', load_messages=[])
+            else:
+                reader: MeasurementReader = reader_factory(self._measurement_path, self._dbc_path)
             self.progress.emit(f"Source: {reader.source_description}")
             for msg in getattr(reader, "load_messages", []):
                 self.progress.emit(msg)
@@ -366,7 +382,10 @@ class LoadWorker(QObject):
             store = SignalStore()
             self._live_store = store
 
-            if hasattr(reader, "iter_decoded_channel_arrays"):
+            if manifest and not manifest['frame_count']:
+                store.base_ts = manifest['origin']
+                store.diagnostics_text = 'Cloud BLF: physical observations without complete bus frames.'
+            elif hasattr(reader, "iter_decoded_channel_arrays"):
                 self._run_mdf_bus_arrays(reader, store)
             elif reader.has_raw_frames and hasattr(reader, "iter_frames_only"):
                 # Packed raw-frame read followed by one bulk vectorised decode.
@@ -382,7 +401,23 @@ class LoadWorker(QObject):
             else:
                 self._run_sample_loop(reader, store)
 
+            if manifest:
+                attach_metadata(store, manifest, cloud_samples)
+                store.cloud_blf_path = self._measurement_path
+                store.cloud_channel_config = self._channel_config
+                self.tree_update.emit(store.build_tree_payload())
+            if self._csv_sources and not manifest:
+                from core.supplemental_csv import attach_csv_sources
+                attach_csv_sources(store, self._csv_sources, self._measurement_path, self.progress.emit)
+                store.diagnostics_text += '\n\nCSV SIGNAL SOURCES\n' + '\n'.join(
+                    f"{r['name']}: {r['signals']} signals, {r['samples']} samples, "
+                    f"encoding={r['encoding']}, alignment={r['time_basis']}, "
+                    f"non-finite values skipped={r['invalid_values']}\n{r['path']}"
+                    for r in store.csv_source_reports)
+
             load_warnings = list(getattr(reader, "load_warnings", ()) or ())
+            if manifest and manifest['unmatched']:
+                load_warnings.append(f"Cloud CSV: {len(manifest['unmatched'])} unmatched signal group(s); see Diagnostics for the exact networks, IDs and names.")
             store.load_warnings = load_warnings
             if load_warnings:
                 warning_text = "\n".join(

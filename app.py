@@ -7,13 +7,14 @@
 from __future__ import annotations
 
 import sys
+import argparse
 from pathlib import Path
 
 from PySide6.QtGui import QIcon
 from PySide6.QtWidgets import QApplication
 
 APP_NAME    = "Osvanta Bus Log Analyzer"
-APP_VERSION = "v00.02.02"
+APP_VERSION = "v00.02.02+tony.playback.10"
 
 
 def main() -> int:
@@ -22,6 +23,10 @@ def main() -> int:
     from gui import release_test
     if release_test.requested(sys.argv):
         return release_test.run(sys.argv, APP_NAME, APP_VERSION)
+
+    parser = argparse.ArgumentParser(description=APP_NAME, add_help=False)
+    parser.add_argument('--config', help='Open a saved measurement and playback configuration')
+    options, _ = parser.parse_known_args()
 
     app = QApplication(sys.argv)
     app.setApplicationName(APP_NAME)
@@ -72,6 +77,9 @@ def main() -> int:
 
     window.show()
     splash.finish(window)
+    if options.config:
+        from PySide6.QtCore import QTimer
+        QTimer.singleShot(0, lambda: window.open_configuration_path(options.config))
     driver = release_test.drive_if_requested(window, sys.argv)  # noqa: F841 — alive until exit
     return app.exec()
 

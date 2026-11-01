@@ -256,6 +256,12 @@ if _gpl_only or _qml:
 # Windows would refuse to load it at run time, so the failure would otherwise
 # reach a user first. pefile comes with PyInstaller on Windows.
 _needs_dropped = []
+_needs_symbols = []
+_qt_dependencies = {
+    p.name.lower(): p for p in _install_dir.rglob('*.dll')
+    if p.name.lower().startswith('qt6') or p.name.lower() in {'icuuc.dll', 'icuin.dll'}
+}
+_exports = {}
 for _binary in sorted(_install_dir.rglob("*")):
     if _binary.suffix.lower() not in (".dll", ".pyd", ".exe"):
         continue
@@ -270,10 +276,28 @@ for _binary in sorted(_install_dir.rglob("*")):
         if _dropped(_needed):
             _needs_dropped.append(
                 f"{_binary.relative_to(_install_dir).as_posix()} needs {_needed}")
+        # DLL names alone do not establish ABI compatibility. A Poppler ICU
+        # found on PATH can shadow Windows ICU but export only suffixed names.
+        _dependency = _qt_dependencies.get(_needed.lower())
+        if _dependency is not None:
+            if _dependency not in _exports:
+                _dep_pe = pefile.PE(str(_dependency), fast_load=True, max_symbol_exports=65536)
+                _dep_pe.parse_data_directories(directories=[pefile.DIRECTORY_ENTRY['IMAGE_DIRECTORY_ENTRY_EXPORT']])
+                _exports[_dependency] = {s.name for s in getattr(getattr(_dep_pe, 'DIRECTORY_ENTRY_EXPORT', None), 'symbols', []) if s.name}
+                _dep_pe.close()
+            _missing = [s.name.decode() for s in _import.imports if s.name and s.name not in _exports[_dependency]]
+            if _missing:
+                _needs_symbols.append(f"{_binary.relative_to(_install_dir).as_posix()} needs missing symbols from {_dependency.relative_to(_install_dir).as_posix()}: " + ', '.join(_missing[:8]))
     _pe.close()
 if _needs_dropped:
     raise SystemExit(
         "Build refused: something in the folder links to a library this spec drops.\n  "
         + "\n  ".join(_needs_dropped)
         + "\nTake that library out of _UNUSED_QT in BusLogAnalyzer.spec."
+    )
+if _needs_symbols:
+    raise SystemExit(
+        'Build refused: a bundled Qt/ICU DLL has an incompatible ABI.\n  '
+        + '\n  '.join(_needs_symbols)
+        + '\nRebuild with a clean PATH. Do not shadow Windows ICU with a Conda/Poppler DLL.'
     )

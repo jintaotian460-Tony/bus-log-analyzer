@@ -69,6 +69,10 @@ from core.bus_types import (
     sort_key,
 )
 from core.channel_config import ChannelConfig
+from core.project_config import normalise_project
+from core.signal_inheritance import recording_family
+from gui import signal_inheritance
+from gui import analysis_templates
 from gui import app_data, app_log, session_restore, survey_prompt
 from gui.brand_logo import BrandLogo, leave_logo_unframed
 from gui.dbc_manager import DBCManagerDialog
@@ -80,6 +84,7 @@ from gui.overflow_row import OverflowButtonRow
 from gui.plot_icons import icon_button, plot_icon
 from gui.plot_tag import PlotTag, load_plot_tag, save_plot_tag
 from gui.plot_widget import PlotPanel
+from gui.playback_bar import PlaybackBar
 from gui.signal_tree import SignalTreeWidget
 from gui.calculated_signal_dialog import CalculatedSignalDialog, CalculationWorker
 from gui.raw_frame_dialog import RawFrameDialog
@@ -233,6 +238,7 @@ class MainWindow(QMainWindow):
         self.measurement_path: str | None = None
         # Multi-DBC channel configuration — persists between measurement loads
         self.channel_config: ChannelConfig = ChannelConfig()
+        self.project = normalise_project()
         # Legacy single-DBC alias for config backward-compat
         self.dbc_path: str | None = None
         self.blf_path: str | None = None  # deprecated alias
@@ -374,8 +380,16 @@ class MainWindow(QMainWindow):
             self._splash.set_status(message)
 
     def _build_ui(self) -> None:
+        from gui.log_explorer import LogExplorer
+        self.log_explorer = LogExplorer()
+        self.log_explorer.fileActivated.connect(lambda path: self.open_measurement_path(path, auto_decode=True))
+        self.log_explorer.rootChanged.connect(self._log_root_changed)
         self.signal_tree = SignalTreeWidget()
         self.plot_panel = PlotPanel()
+        self.playback = PlaybackBar(self)
+        self.playback.positionChanged.connect(self._playback_position)
+        self.playback.gapTimeoutChanged.connect(self._playback_gap_changed)
+        self.plot_panel.cursor1Moved.connect(self._playback_cursor_moved)
         self.log_box = QTextEdit()
         self.log_box.setReadOnly(True)
         self.diagnostics_box = QTextEdit()
@@ -384,6 +398,8 @@ class MainWindow(QMainWindow):
         self.measurement_box.setReadOnly(True)
 
         self.signal_tree.signalActivated.connect(self.add_signals_to_plot)
+        self.signal_tree.matchRequested.connect(lambda key: signal_inheritance.confirm_mapping(self, key))
+        self.plot_panel.signalMatchRequested.connect(lambda key: signal_inheritance.confirm_mapping(self, key))
         self.signal_tree.generatedRenameRequested.connect(self.rename_generated_signal)
         self.signal_tree.generatedEditRequested.connect(self.edit_generated_signal)
         self.signal_tree.generatedDeleteRequested.connect(self.delete_generated_signal)
@@ -419,6 +435,13 @@ class MainWindow(QMainWindow):
         self.btn_stacked.setChecked(True)  # default plot mode on app startup
         self.btn_multistack = QPushButton('MultiStack')
         self.btn_multistack.setCheckable(True)
+        self.btn_windows = QPushButton('多窗口')
+        self.btn_windows.setCheckable(True)
+        self.btn_windows.setToolTip('每窗独立信号列表，共用时间轴与双游标')
+        self.btn_new_window = QPushButton('＋窗口')
+        self.btn_new_window.setEnabled(False)
+        self.btn_new_window.clicked.connect(self.plot_panel.new_window)
+        self.template_menu = analysis_templates.TemplateMenu(self)
         # Not a plot mode: the plotted signals as a table, in place of the plot.
         self.btn_table = QPushButton('Table')
         self.btn_table.setCheckable(True)
@@ -436,6 +459,14 @@ class MainWindow(QMainWindow):
         self.btn_line_mode = icon_button('step_lines', '', '')
         self.btn_points = icon_button('points', 'Show Data Points', 'Show Data Points')
         self.btn_points.setCheckable(True)
+        self.btn_points.setText('采样点')
+        self.btn_points.setAccessibleName('采样点')
+        self.btn_points.setToolTip('显示原始采样点；悬停查看时间、值及相邻采样间隔。密集视图会标明稀疏显示。')
+        self.btn_points.setChecked(True)
+        self.btn_time_10ms = QPushButton('10 ms')
+        self.btn_time_10ms.setAccessibleName('10 ms time ticks')
+        self.btn_time_10ms.setToolTip('放大当前游标或视图中心，底部小刻度为 10 ms。仅改变视图，不重采样；Fit 恢复全程。')
+        self.btn_time_10ms.clicked.connect(lambda: self.plot_panel.zoom_to_time_ticks(.01))
         self.btn_hide_line = icon_button('hide_line', 'Hide Line',
                                          'Hide Line: the data points only, once they are shown')
         self.btn_hide_line.setCheckable(True)
@@ -446,12 +477,12 @@ class MainWindow(QMainWindow):
         self.btn_clear_plot.setEnabled(False)  # enabled after decode
         # The plot modes, which keep their text, then the icon buttons, and
         # Clear Plot apart from them.
-        for btn in (self.btn_multi_axis, self.btn_stacked, self.btn_multistack, self.btn_table):
+        for btn in (self.btn_multi_axis, self.btn_stacked, self.btn_multistack, self.btn_windows, self.btn_new_window, self.template_menu, self.btn_table):
             self.plot_button_row.add_button(btn)
         self.plot_button_row.add_gap(18)
         for btn in (self.btn_fit, self.btn_fit_v, self.btn_zoom_rect, self.btn_cursor1,
                     self.btn_cursor2, self.btn_line_mode, self.btn_points,
-                    self.btn_hide_line, None,
+                    self.btn_hide_line, self.btn_time_10ms, None,
                     self.btn_clear_plot):
             if btn is None:
                 self.plot_button_row.add_gap(18)
@@ -466,6 +497,7 @@ class MainWindow(QMainWindow):
         self.btn_multi_axis.toggled.connect(self._toggle_multi_axis)
         self.btn_stacked.toggled.connect(self._toggle_stacked)
         self.btn_multistack.toggled.connect(self._toggle_multistack)
+        self.btn_windows.toggled.connect(self._toggle_windows)
         self.btn_table.toggled.connect(self.plot_panel.set_table_view)
         self.btn_cursor1.toggled.connect(self._toggle_cursor1)
         self.btn_cursor2.toggled.connect(self._toggle_cursor2)
@@ -478,6 +510,8 @@ class MainWindow(QMainWindow):
         # The buttons were set before their toggled signals were connected.
         self.plot_panel.set_cursor1_enabled(self.btn_cursor1.isChecked())
         self._set_step_lines(True, announce=False)   # steps by default
+        self.plot_panel.set_show_points(self.btn_points.isChecked())
+        self.btn_hide_line.setEnabled(self.btn_points.isChecked())
 
         # The plot buttons sit above the plot only, level with the signal
         # table's header, so the table runs the full height of the panel.
@@ -492,7 +526,8 @@ class MainWindow(QMainWindow):
 
         center_panel = QWidget()
         center_layout = QVBoxLayout(center_panel)
-        center_layout.setContentsMargins(6, 6, 6, 6)
+        center_layout.setContentsMargins(0, 0, 0, 0)
+        center_layout.setSpacing(0)
         self._center_layout = center_layout
 
         self.center_splitter = QSplitter(Qt.Orientation.Horizontal)
@@ -502,15 +537,33 @@ class MainWindow(QMainWindow):
         self.center_splitter.setStretchFactor(0, 0)
         self.center_splitter.setStretchFactor(1, 1)
         self.center_splitter.setSizes([240, 1280])
+        center_layout.addWidget(self.playback)
         center_layout.addWidget(self.center_splitter, stretch=1)
         self.setCentralWidget(center_panel)
 
-        self.left_dock = QDockWidget('Decoded Signals', self)
+        self.left_dock = QDockWidget('Log Explorer', self)
         self.left_dock.setAllowedAreas(
             Qt.DockWidgetArea.LeftDockWidgetArea | Qt.DockWidgetArea.RightDockWidgetArea
         )
-        self.left_dock.setWidget(self.signal_tree)
+        self.left_dock.setWidget(self.log_explorer)
         self.addDockWidget(Qt.DockWidgetArea.LeftDockWidgetArea, self.left_dock)
+        signal_version = self.version.rsplit('+', 1)[-1].removeprefix('tony.')
+        self.signal_dock = QDockWidget(f'Signals — {signal_version}', self)
+        self.signal_dock.setObjectName('FloatingSignalTree')
+        self.signal_dock.setAllowedAreas(Qt.DockWidgetArea.NoDockWidgetArea)
+        self.signal_dock.setWidget(self.signal_tree)
+        self.addDockWidget(Qt.DockWidgetArea.RightDockWidgetArea, self.signal_dock)
+        self.signal_dock.setFloating(True)
+        self.signal_dock.setWindowFlags(
+            Qt.WindowType.Window | Qt.WindowType.CustomizeWindowHint
+            | Qt.WindowType.WindowTitleHint | Qt.WindowType.WindowSystemMenuHint
+            | Qt.WindowType.WindowMinimizeButtonHint | Qt.WindowType.WindowMaximizeButtonHint
+            | Qt.WindowType.WindowCloseButtonHint
+        )
+        self.signal_dock.resize(380, 620)
+        self.signal_dock.hide()
+        self._signals_window_visible = True
+        self.signal_dock.visibilityChanged.connect(self._remember_signal_window_visibility)
 
         self.bottom_tabs = QTabWidget()
         self.bottom_tabs.addTab(self.log_box, 'Log')
@@ -528,7 +581,7 @@ class MainWindow(QMainWindow):
         left_title = QWidget()
         left_title_layout = QHBoxLayout(left_title)
         left_title_layout.setContentsMargins(4, 2, 4, 2)
-        left_title_layout.addWidget(QLabel('Decoded Signals'))
+        left_title_layout.addWidget(QLabel('Log Explorer'))
         left_title_layout.addStretch(1)
         self.left_toggle_btn = QToolButton()
         self.left_toggle_btn.setText('◀')
@@ -550,14 +603,22 @@ class MainWindow(QMainWindow):
         self.left_dock.visibilityChanged.connect(self._sync_panel_toggle_buttons)
         self.bottom_dock.visibilityChanged.connect(self._sync_panel_toggle_buttons)
 
-        # Handles on the panels' edges, in the gap between each panel and the
-        # plot area, so they cover nothing.
+        # One painted pixel, with a transparent mouse target across the boundary.
+        # Native dock separators have the same visual thickness; no blank gutter
+        # is reserved for either of the two handles.
+        self.setStyleSheet('QMainWindow::separator { width: 1px; height: 1px; '
+                           'background: palette(mid); }')
+        self._panel_resize = {}
         self.left_edge_btn = EdgeTab(Qt.Orientation.Vertical, self)
-        self.left_edge_btn.clicked.connect(self._toggle_left_panel)
+        self.left_edge_btn.doubleClicked.connect(self._toggle_left_panel)
+        self.left_edge_btn.dragStarted.connect(lambda: self._begin_panel_resize('left'))
+        self.left_edge_btn.dragged.connect(lambda delta: self._resize_panel('left', delta))
         self.left_edge_btn.show()
 
         self.bottom_edge_btn = EdgeTab(Qt.Orientation.Horizontal, self)
-        self.bottom_edge_btn.clicked.connect(self._toggle_bottom_panel)
+        self.bottom_edge_btn.doubleClicked.connect(self._toggle_bottom_panel)
+        self.bottom_edge_btn.dragStarted.connect(lambda: self._begin_panel_resize('bottom'))
+        self.bottom_edge_btn.dragged.connect(lambda delta: self._resize_panel('bottom', delta))
         self.bottom_edge_btn.show()
         # The handles follow the plot area whenever a panel is shown, hidden,
         # moved or resized.
@@ -618,6 +679,9 @@ class MainWindow(QMainWindow):
         for act, slot in [
             (self.file_menu.open_configuration_action, self.load_configuration),
             (self.file_menu.save_configuration_action, self.save_configuration),
+            (self.file_menu.open_project_action, self.open_project),
+            (self.file_menu.save_project_action, self.save_project),
+            (self.file_menu.project_settings_action, self.edit_project_settings),
             (self.file_menu.export_action, self.export_selected),
             (self.file_menu.save_decoded_action, self.save_decoded_as_mf4),
             (self.file_menu.info_action, self.show_measurement_info),
@@ -658,6 +722,16 @@ class MainWindow(QMainWindow):
         self._act_can_trace.triggered.connect(self.show_raw_frames)
         self._act_can_trace.setEnabled(False)  # enabled after decode
         toolbar.addAction(self._act_can_trace)
+        self._act_signals = self.signal_dock.toggleViewAction()
+        self._act_signals.setText('Signals')
+        self._act_signals.triggered.connect(self._restore_minimized_signal_window)
+        toolbar.addAction(self._act_signals)
+        self._act_explorer = self.left_dock.toggleViewAction()
+        self._act_explorer.setText('Log Explorer')
+        toolbar.addAction(self._act_explorer)
+        save_blf = QAction('Save playback BLF…', self)
+        save_blf.triggered.connect(self.save_playback_blf)
+        self.file_menu.addAction(save_blf)
         # Jobs on files that need not be open.
         self.tools_menu = ToolsMenu(self)
         self.tools_menu.convert_action.triggered.connect(self.show_converter)
@@ -1012,6 +1086,14 @@ class MainWindow(QMainWindow):
         )
         if not path:
             return
+        self.open_measurement_path(path)
+
+    def open_measurement_path(self, path: str, auto_decode: bool = False) -> None:
+        if self._refuse_while_loading('opening another measurement'):
+            return
+        if self._calc_thread is not None:
+            QMessageBox.information(self, 'Calculation in progress', 'Wait for the signal calculation to finish.')
+            return
         # Refused here rather than at Decode: a BLF with no CAN traffic
         # cannot be decoded by any database, so letting it through would send
         # the user through channel scanning and database assignment before
@@ -1023,6 +1105,8 @@ class MainWindow(QMainWindow):
             self._capture_temporary_plot_configuration()
             or self._temporary_plot_handoff
         )
+        if self.measurement_path and recording_family(self.measurement_path) != recording_family(path):
+            temporary_handoff = None
         self.measurement_path = path
         self.blf_path = path   # keep alias in sync for config
         self._reset_for_new_measurement()
@@ -1061,8 +1145,20 @@ class MainWindow(QMainWindow):
             'Measurement file selected', self._next_step_message()
         )
         self._queue_measurement_debug_inspection(path)
+        self.log_explorer.select_file(path)
+        if auto_decode:
+            self.load_data()
 
     def _accept_measurement_content(self, path: str) -> bool:
+        from core.cloud_blf import is_cloud_csv, read_metadata
+        try:
+            if Path(path).suffix.lower() == '.csv' and self.project.get('cloud_import') and is_cloud_csv(path):
+                return True
+            if Path(path).suffix.lower() == '.blf' and read_metadata(path)[0]:
+                return True
+        except (OSError, ValueError) as exc:
+            QMessageBox.warning(self, 'Invalid recording', str(exc))
+            return False
         """Return whether *path* holds traffic this build can decode.
 
         Only BLF is checked, and only for the case that otherwise fails
@@ -1200,9 +1296,11 @@ class MainWindow(QMainWindow):
         """Persist the current plot-only setup for the next measurement."""
         keys = self.plot_panel.plotted_keys()
         if not keys:
-            return None
+            return signal_inheritance.capture(self, None)
 
-        if self.btn_multistack.isChecked():
+        if self.btn_windows.isChecked():
+            plot_type = 'windows'
+        elif self.btn_multistack.isChecked():
             plot_type = 'multistack'
         elif self.btn_stacked.isChecked():
             plot_type = 'stacked'
@@ -1231,6 +1329,8 @@ class MainWindow(QMainWindow):
                 for key in keys
             ],
         }
+        if self.btn_windows.isChecked():
+            config['window_layout'] = self.plot_panel.window_layout()
         try:
             self._temporary_plot_config_path.write_text(
                 json.dumps(config, indent=2),
@@ -1242,7 +1342,7 @@ class MainWindow(QMainWindow):
             )
         except Exception as exc:
             self._log(f'Temporary plot configuration save warning: {exc}')
-        return config
+        return signal_inheritance.capture(self, config)
 
     def _arm_temporary_plot_handoff(self) -> None:
         """Queue a captured plot-only configuration for post-decode restore."""
@@ -1287,7 +1387,7 @@ class MainWindow(QMainWindow):
         })
         plot_type = str(data.get('plot_type', 'normal'))
         self._pending_plot_type = (
-            plot_type if plot_type in {'normal', 'multi_axis', 'stacked', 'multistack'}
+            plot_type if plot_type in {'normal', 'multi_axis', 'stacked', 'multistack', 'windows'}
             else 'normal'
         )
 
@@ -1296,7 +1396,12 @@ class MainWindow(QMainWindow):
         plot_type = self._pending_plot_type
         if plot_type is None:
             return
-        if plot_type == 'multistack':
+        self.btn_windows.setChecked(plot_type == 'windows')
+        if plot_type == 'windows':
+            self.btn_multi_axis.setChecked(False)
+            self.btn_stacked.setChecked(False)
+            self.btn_multistack.setChecked(False)
+        elif plot_type == 'multistack':
             self.btn_multi_axis.setChecked(False)
             self.btn_stacked.setChecked(False)
             self.btn_multistack.setChecked(True)
@@ -1314,8 +1419,64 @@ class MainWindow(QMainWindow):
             self.btn_multi_axis.setChecked(False)
         self._pending_plot_type = None
 
+    def _prepare_playback(self) -> None:
+        if self.store is None:
+            return
+        base = float(getattr(self.store, 'base_ts', 0) or 0)
+        frames = getattr(self.store, 'raw_frame_store', None)
+        if frames is not None and len(frames):
+            import numpy as np
+            times = np.frombuffer(frames.timestamps, dtype=np.float64)
+            bounds = float(np.min(times)), float(np.max(times))
+        else:
+            bounds = self.store.time_bounds()
+        extra = getattr(self.store, 'supplemental_time_bounds', None)
+        if extra is not None:
+            bounds = (min(bounds[0], extra[0]) if bounds[0] is not None else extra[0],
+                      max(bounds[1], extra[1]) if bounds[1] is not None else extra[1])
+        self.playback.load(bounds,
+                           epoch=base if base > 946684800 else None,
+                           telemetry=False,
+                           keep_preferences=bool(self.project.get('name') or self.project.get('cloud_import') or self.project.get('csv_sources')))
+        self._playback_gap_changed(self.playback.gap_timeout.value())
+
+    def _playback_position(self, position: float) -> None:
+        if self.store is None:
+            return
+        if not self.btn_cursor1.isChecked():
+            self.btn_cursor1.setChecked(True)
+        self.plot_panel.playback_at(position)
+        if self._raw_frame_dialog is not None:
+            self._raw_frame_dialog.follow_time(position, immediate=True)
+        if self.playback.follow.isChecked() and self.playback.clock.playing:
+            self.plot_panel.follow_playback_time(
+                position, self.playback.clock.start, self.playback.clock.end)
+        self._playback_freshness(position)
+
+    def _playback_cursor_moved(self, position: float) -> None:
+        if self.playback.isEnabled():
+            self.playback.follow_cursor(position)
+            self._playback_freshness(position)
+
+    def _playback_gap_changed(self, timeout: float) -> None:
+        self.plot_panel.set_gap_timeout(timeout)
+        self._playback_freshness(self.playback.clock.position)
+
+    def _playback_freshness(self, position: float) -> None:
+        text, details = self.plot_panel.freshness_summary(position)
+        self.playback.gap_label.setText(text)
+        self.playback.gap_label.setToolTip(details)
+
     def _release_store(self) -> None:
         """Drop the decoded measurement and close the file its signals read."""
+        self.playback.clear()
+        self.plot_panel._playback_readout = False
+        self.plot_panel.set_gap_timeout(0)
+        if self._raw_frame_dialog is not None:
+            dialog, self._raw_frame_dialog = self._raw_frame_dialog, None
+            self.plot_panel.cursor1Moved.disconnect(dialog.follow_time)
+            dialog.close()
+            dialog.deleteLater()
         store, self.store = self.store, None
         close = getattr(store, 'close', None)
         if close is not None:
@@ -1325,9 +1486,17 @@ class MainWindow(QMainWindow):
         """Remove decoded and plotted state belonging to the previous file."""
         self.plot_panel.clear_all()
         self.plot_panel.discard_undo_history()
+        self.plot_panel._window_specs = []
+        self.plot_panel._window_y_restore = {}
+        if self.plot_panel._windows_mode:
+            self.plot_panel.redraw()
         self.plot_panel.set_markers([])     # they mark times of the previous file
         self.plot_panel.set_measurement_file(None)
         self.signal_tree.set_payload({})
+        self.signal_tree.set_unavailable_signals({})
+        self._inherited_signals = []
+        self._inherited_source_bindings = {}
+        self._inherited_dependencies = {}
         self.signal_tree.set_generated_signals([])
         self.calculated_signals.invalidate_cache()
         self._calc_queue.clear()
@@ -1520,6 +1689,7 @@ class MainWindow(QMainWindow):
 
     def _toggle_multi_axis(self, checked: bool) -> None:
         if checked:
+            self.btn_windows.setChecked(False)
             self.btn_stacked.setChecked(False)   # mutually exclusive
             self.btn_multistack.setChecked(False)
         self.plot_panel.set_multi_axis(checked)
@@ -1527,6 +1697,7 @@ class MainWindow(QMainWindow):
 
     def _toggle_stacked(self, checked: bool) -> None:
         if checked:
+            self.btn_windows.setChecked(False)
             self.btn_multi_axis.setChecked(False)  # mutually exclusive
             self.btn_multistack.setChecked(False)
         self.plot_panel.set_stacked(checked)
@@ -1534,10 +1705,21 @@ class MainWindow(QMainWindow):
 
     def _toggle_multistack(self, checked: bool) -> None:
         if checked:
+            self.btn_windows.setChecked(False)
             self.btn_multi_axis.setChecked(False)
             self.btn_stacked.setChecked(False)
         self.plot_panel.set_multistack(checked)
         self._update_status('Plot mode updated', 'Drag signals into a stack to overlay them')
+
+    def _toggle_windows(self, checked: bool) -> None:
+        if checked:
+            self.btn_multi_axis.setChecked(False)
+            self.btn_stacked.setChecked(False)
+            self.btn_multistack.setChecked(False)
+        self.plot_panel.table_panel.setVisible(not checked)
+        self.btn_new_window.setEnabled(checked)
+        self.plot_panel.set_windows(checked)
+        self._update_status('多窗口' if checked else 'Plot mode updated', '选择目标窗口，双击或拖入信号；每窗可切换共轴/独立轴。')
 
     def _toggle_rect_zoom(self, checked: bool) -> None:
         self.plot_panel.set_rect_zoom(checked)
@@ -1605,6 +1787,11 @@ class MainWindow(QMainWindow):
                 'This measurement does not contain raw CAN frame records.',
             ) if self.store else 'Load a measurement file first.'
             QMessageBox.information(self, 'Trace unavailable', reason)
+            return
+        if self._raw_frame_dialog is not None:
+            self._raw_frame_dialog.show()
+            self._raw_frame_dialog.raise_()
+            self._raw_frame_dialog.activateWindow()
             return
         self._raw_frame_dialog = RawFrameDialog(rfs, self, settings_path=self._user_settings_path)
         # Picking a frame places a cursor there; Cursor 1 brings its frame into view.
@@ -1865,7 +2052,8 @@ class MainWindow(QMainWindow):
             if self.calculated_signals.contains_key(key):
                 series = self.calculated_signals.cached_series(key)
             else:
-                series = self.store.get_series(key) if self.store is not None else None
+                bound_key = getattr(self, '_inherited_source_bindings', {}).get(key, key)
+                series = self.store.get_series(bound_key) if self.store is not None and bound_key else None
             if series is None:
                 raise CalculatedSignalError(f"Signal not available: {key}")
             resolved[key] = series
@@ -1919,6 +2107,7 @@ class MainWindow(QMainWindow):
                 TIME_SIGNAL_KEY,
                 *self.store.all_keys(),
                 *self.calculated_signals.keys(),
+                *getattr(self, '_inherited_source_bindings', {}),
             ]
             parsed = parse_formula(definition.formula, available)
             prerequisites = self._uncomputed_prerequisites(parsed.references)
@@ -1931,7 +2120,8 @@ class MainWindow(QMainWindow):
                 if self.calculated_signals.contains_key(key):
                     series = self.calculated_signals.cached_series(key)
                 else:
-                    series = self.store.get_series(key)
+                    bound_key = getattr(self, '_inherited_source_bindings', {}).get(key, key)
+                    series = self.store.get_series(bound_key) if bound_key else None
                 if series is not None:
                     estimated_points += series.sample_count
             if parsed.references == (TIME_SIGNAL_KEY,):
@@ -1979,6 +2169,11 @@ class MainWindow(QMainWindow):
                         f"Signal calculation skipped ({definition.name}): {exc}"
                     )
                     self._abandon_dependent_calculations(definition.key)
+                    for key in [definition.key, *self.calculated_signals.dependents_of(definition.key)]:
+                        item = self.plot_panel._items.get(key)
+                        if item and item.unavailable_reason:
+                            item.unavailable_reason = '本日志未匹配：计算输入不可用'
+                    self.plot_panel.redraw()
                     continue
             self._start_calculation((definition, operation, plot_after), source_series)
             return
@@ -2074,6 +2269,9 @@ class MainWindow(QMainWindow):
             return
         definition = self._calc_active_request[0] if self._calc_active_request else None
         name = definition.name if definition else "signal"
+        if definition and definition.key in self.plot_panel._items:
+            self.plot_panel._items[definition.key].unavailable_reason = '本日志计算失败'
+            self.plot_panel.redraw()
         self._log(f"Signal calculation failed ({name}): {error_message}")
         message = error_message
         if definition is not None:
@@ -2102,6 +2300,108 @@ class MainWindow(QMainWindow):
         self._dispatch_next_calculation()
         if self._calc_thread is None:
             self._plot_calculated_signals()
+
+    def _update_project_label(self) -> None:
+        self.log_explorer.set_root(self.project.get('log_root', ''))
+        name = self.project.get('name') or 'Playback'
+        self.playback.project_label.setText(name)
+        self.playback.project_label.setToolTip(f'Active project: {name}')
+
+    def _log_root_changed(self, path):
+        self.project['log_root'] = path
+
+    def save_playback_blf(self):
+        if not self.store or not getattr(self.store, 'cloud_blf_path', None):
+            QMessageBox.information(self, 'Playback BLF', 'Import a cloud CSV or open a generated playback BLF first.')
+            return
+        source = Path(self.store.cloud_blf_path)
+        path, _ = QFileDialog.getSaveFileName(self, 'Save single-file playback BLF',
+                                             str(Path(self.project.get('log_root') or source.parent) / (self.store.cloud_manifest['source'] + '.blf')), 'BLF (*.blf)')
+        if path and Path(path).resolve() != source.resolve():
+            import shutil
+            try:
+                shutil.copyfile(source, path)
+                self._log(f'Saved playback BLF: {path}')
+            except OSError as exc:
+                QMessageBox.critical(self, 'Save playback BLF failed', str(exc))
+
+    def edit_project_settings(self) -> None:
+        if self._refuse_while_loading('editing project settings'):
+            return
+        if self._calc_thread is not None:
+            QMessageBox.information(self, 'Calculation in progress', 'Wait for the calculation to finish.')
+            return
+        from gui.project_settings import ProjectSettingsDialog
+        self.playback.pause()
+        dialog = ProjectSettingsDialog(self.project, self.playback.to_config(),
+                                       self._measurement_file() or '', self)
+        if dialog.exec() != QDialog.DialogCode.Accepted:
+            return
+        project, playback = dialog.value()
+        self.project = normalise_project(project)
+        self._update_project_label()
+        self.playback.apply_config(playback)
+        if self._measurement_file():
+            self._temporary_plot_handoff = self._capture_temporary_plot_configuration()
+            self.load_data()
+        else:
+            self._update_status(f"Project: {self.project.get('name') or 'Unnamed'}", 'Open a measurement, then Decode')
+
+    def save_project(self) -> None:
+        from core.project_config import save_project
+        name = self.project.get('name') or 'project'
+        path, _ = QFileDialog.getSaveFileName(self, 'Save project profile',
+                                             f'{name}.osvanta_project.json', 'Osvanta project (*.json)')
+        if not path:
+            return
+        project = normalise_project(self.project)
+        if self.store is not None:
+            project['default_plot_keys'] = self.plot_panel.plotted_keys()
+        channels = {'name': self.channel_config.name,
+                    'channels': {encode_key(k): v for k, v in self.channel_config.channels.items()}}
+        try:
+            save_project(path, project, channels, self.playback.to_config())
+            analysis_templates.bind_profile(self, path)
+        except (OSError, ValueError) as exc:
+            QMessageBox.critical(self, 'Save project failed', str(exc))
+            return
+        self.project = project
+        self._log(f'Project saved: {path}')
+        self._update_status(f'Project saved: {name}', 'Open project to use these settings with another recording')
+
+    def open_project(self) -> None:
+        if self._refuse_while_loading('opening a project'):
+            return
+        if self._calc_thread is not None:
+            QMessageBox.information(self, 'Calculation in progress', 'Wait for the calculation to finish.')
+            return
+        path, _ = QFileDialog.getOpenFileName(self, 'Open project profile', '', 'Osvanta project (*.json)')
+        if not path:
+            return
+        from core.project_config import load_project
+        try:
+            data = load_project(path)
+            config = data['channel_config']
+            channels = ChannelConfig(name=config.get('name', 'Project databases'),
+                                      channels={decode_key(k): v for k, v in config.get('channels', {}).items()})
+        except (OSError, ValueError, TypeError, KeyError) as exc:
+            QMessageBox.critical(self, 'Open project failed', str(exc))
+            return
+        # A profile has no recording. Do not decode the previous project's
+        # file with the newly selected databases.
+        self._reset_for_new_measurement()
+        self.measurement_path = self.blf_path = self.dbc_path = None
+        self._temporary_plot_handoff = None
+        self._config_path = self._config_snapshot = None
+        self.project = data['project']
+        analysis_templates.bind_profile(self, path)
+        self.channel_config = channels
+        self.playback.apply_config(data.get('playback', {}))
+        self._update_project_label()
+        self._update_measurement_tab()
+        self._update_action_states()
+        self._log(f'Project opened: {path}')
+        self._update_status(f"Project: {self.project.get('name') or 'Unnamed'}", 'Open a recording for this project, then Decode')
 
     def save_configuration(self) -> None:
         self._save_configuration_to(self._config_path or 'osvanta_config.json')
@@ -2144,12 +2444,20 @@ class MainWindow(QMainWindow):
             'multi_axis': self.btn_multi_axis.isChecked(),
             'stacked': self.btn_stacked.isChecked(),
             'multistack': self.btn_multistack.isChecked(),
+            'windows': self.btn_windows.isChecked(),
+            'window_layout': self.plot_panel.window_layout(),
             'cursor1': self.btn_cursor1.isChecked(),
             'cursor2': self.btn_cursor2.isChecked(),
             'name_show_channel': self.plot_panel._name_show_channel,
             'name_show_message': self.plot_panel._name_show_message,           # Fix 4
             'table_column_widths': self.plot_panel.table_column_widths(),  # Fix 2
             'markers': self.plot_panel.markers_config(),
+            'playback': self.playback.to_config(),
+            'project': normalise_project(self.project),
+            'project_profile_path': getattr(self, '_project_profile_path', None),
+            'panels': {'log_explorer': not self.left_dock.isHidden(),
+                       'signals_visible': self._signals_window_visible,
+                       'signals_geometry': bytes(self.signal_dock.saveGeometry().toBase64()).decode('ascii')},
         }
 
     def _save_configuration_to(self, start: str) -> bool:
@@ -2184,11 +2492,19 @@ class MainWindow(QMainWindow):
         path, _ = QFileDialog.getOpenFileName(self, 'Load configuration', '', 'JSON Files (*.json)')
         if not path:
             return
+        self.open_configuration_path(path)
+
+    def open_configuration_path(self, path: str) -> None:
+        """Open a saved session, including the explicit --config startup path."""
         try:
             data = json.loads(Path(path).read_text(encoding='utf-8'))
+            if not isinstance(data, dict):
+                raise ValueError('Configuration must be a JSON object')
+            normalise_project(data.get('project'), Path(path).parent)
         except Exception as exc:
             QMessageBox.critical(self, 'Load configuration failed', str(exc))
             return
+        self._session_offered = True
         self._config_path = path
         self._config_snapshot = data if isinstance(data, dict) else None
         self._apply_configuration(data, path)
@@ -2201,9 +2517,31 @@ class MainWindow(QMainWindow):
         self._temporary_plot_handoff = None
         self._pending_plot_type = None
 
+        self._inherited_signals = []
+        self._inherited_source_bindings = {}
+        self._inherited_dependencies = {}
+        self.signal_tree.set_unavailable_signals({})
+
         # measurement_path is the canonical key; blf_path is read as a fallback
         # for configs saved by older CANScope versions.
         cfg_mpath = data.get('measurement_path') or data.get('blf_path')
+        self.project = normalise_project(data.get('project'), Path(path).parent)
+        profile_path = data.get('project_profile_path')
+        if profile_path and not Path(profile_path).is_absolute():
+            profile_path = str(Path(path).parent / profile_path)
+        analysis_templates.bind_profile(self, profile_path)
+        self._update_project_label()
+        self.playback.apply_config(data.get('playback'))
+        panels = data.get('panels', {})
+        self._signals_window_visible = bool(panels.get('signals_visible', True))
+        self.left_dock.setVisible(panels.get('log_explorer', True))
+        if not self._signals_window_visible:
+            self.signal_dock.hide()
+        elif self.store is not None:
+            self.signal_dock.show()
+        if panels.get('signals_geometry'):
+            from PySide6.QtCore import QByteArray
+            self.signal_dock.restoreGeometry(QByteArray.fromBase64(panels['signals_geometry'].encode('ascii')))
         cfg_dbc = data.get('dbc_path')
         # Restore channel_config (new format) or fall back to single-DBC compat
         cfg_ch = data.get('channel_config')
@@ -2298,7 +2636,7 @@ class MainWindow(QMainWindow):
 
         # Apply visual settings regardless of data source
         self._set_step_lines(bool(data.get('step_lines', True)), announce=False)
-        self.btn_points.setChecked(bool(data.get('show_data_points', False)))
+        self.btn_points.setChecked(bool(data.get('show_data_points', True)))
         self.btn_hide_line.setChecked(
             bool(data.get('hide_plot_lines', False)) and self.btn_points.isChecked()
         )
@@ -2310,11 +2648,16 @@ class MainWindow(QMainWindow):
         self.plot_panel.set_markers(markers if isinstance(markers, list) else [])
         multi_axis = bool(data.get('multi_axis', False))
         multistack = bool(data.get('multistack', False))
+        windows = bool(data.get('windows', False))
+        self._pending_window_layout = data.get('window_layout', []) if windows else []
+        self.btn_windows.setChecked(False)
         stacked = bool(data.get('stacked', not multi_axis and not multistack))
         self.btn_multi_axis.setChecked(False)
         self.btn_stacked.setChecked(False)
         self.btn_multistack.setChecked(False)
-        if multistack:
+        if windows:
+            self.btn_windows.setChecked(True)
+        elif multistack:
             self.btn_multistack.setChecked(True)
         elif multi_axis:
             self.btn_multi_axis.setChecked(True)
@@ -2360,6 +2703,12 @@ class MainWindow(QMainWindow):
                         needs_rebuild = True
             if needs_rebuild:
                 self.plot_panel._rebuild_curves(preserve_selection=False)
+            self._prepare_playback()
+            if self.btn_windows.isChecked() and self._pending_window_layout:
+                self.plot_panel.apply_window_layout(self._pending_window_layout)
+                self._pending_window_layout = []
+            self.plot_panel.playback_at(self.playback.clock.position)
+            self._playback_freshness(self.playback.clock.position)
             return
 
         # Reload from config measurement path (+ database, if the format needs one)
@@ -2389,7 +2738,9 @@ class MainWindow(QMainWindow):
                 'Use "Open Measurement" to locate it, then try again.'
             )
             return
-        if dbc_required_for(cfg_mpath) and self.channel_config.is_empty():
+        from core.cloud_blf import read_metadata
+        embedded = Path(cfg_mpath).suffix.lower() == '.blf' and read_metadata(cfg_mpath)[0] is not None
+        if dbc_required_for(cfg_mpath) and self.channel_config.is_empty() and not embedded:
             QMessageBox.warning(
                 self, 'Incomplete configuration',
                 'This measurement file requires a database (DBC, ARXML or LDF), '
@@ -2426,7 +2777,9 @@ class MainWindow(QMainWindow):
             return
         self._show_mixed_mdf_notice(mpath)
         # Database required only for CAN-raw formats
-        if dbc_required_for(mpath) and self.channel_config.is_empty():
+        from core.cloud_blf import read_metadata
+        embedded = Path(mpath).suffix.lower() == '.blf' and read_metadata(mpath)[0] is not None
+        if dbc_required_for(mpath) and self.channel_config.is_empty() and not embedded:
             reply = QMessageBox.question(
                 self, 'No database configured',
                 'This format requires a database (DBC or ARXML) for signal decoding.\n'
@@ -2446,7 +2799,8 @@ class MainWindow(QMainWindow):
         if pending_plot_keys is None and self._temporary_plot_handoff:
             self._arm_temporary_plot_handoff()
         else:
-            self._pending_plot_keys = list(pending_plot_keys or [])
+            self._pending_plot_keys = list(self.project.get('default_plot_keys', [])
+                                           if pending_plot_keys is None else pending_plot_keys)
         self.plot_panel.clear_all()
         self.plot_panel.discard_undo_history()
         # Signals plotted from here on, while decoding and after, are this file's.
@@ -2470,7 +2824,12 @@ class MainWindow(QMainWindow):
         )
         self._update_status('Loading and decoding...', 'Wait for decode to finish, then inspect Diagnostics and plot signals')
         self._thread = QThread(self)
-        self._worker = LoadWorker(mpath, self.channel_config if not self.channel_config.is_empty() else None)
+        config = self.channel_config if not self.channel_config.is_empty() else None
+        sources = self.project.get('csv_sources', [])
+        cloud = self.project.get('cloud_import', {})
+        self._worker = (LoadWorker(mpath, config, csv_sources=sources, cloud_import=cloud) if cloud else
+                       LoadWorker(mpath, config, csv_sources=sources) if sources
+                        else LoadWorker(mpath, config))
         self._worker.moveToThread(self._thread)
         self._thread.started.connect(self._worker.run)
         self._worker.progress.connect(self._on_worker_progress)
@@ -2574,6 +2933,10 @@ class MainWindow(QMainWindow):
             )
 
     def add_signal_to_plot(self, key: str, fit: bool = True) -> bool:
+        if self.plot_panel._windows_mode and key in self.plot_panel._items:
+            item = self.plot_panel._items[key]
+            self.plot_panel.add_series(key, item.series, item.color)
+            return True
         # Generated signals are calculated only from a completed measurement;
         # ordinary measurement signals may still use the existing live store.
         if self.calculated_signals.contains_key(key) and self.store is None:
@@ -2983,7 +3346,14 @@ class MainWindow(QMainWindow):
     def _on_worker_finished(self, store: SignalStore) -> None:
         if self._closing:
             return  # nothing left to show it in
+        if getattr(store, 'cloud_manifest', None):
+            self.measurement_path = self.blf_path = store.cloud_blf_path
+            self.channel_config = store.cloud_channel_config
+            self.playback.use_recording_time_mode(store.cloud_manifest['time_mode'])
+            self._log('CSV reconstruction loaded from a single BLF; embedded matrix definitions and validity records are in use.')
+        self.signal_dock.setVisible(self._signals_window_visible)
         self.store = store
+        self._prepare_playback()
         self._update_action_states()
         # Expose store immediately so pending plots and post-decode plots work
         self.signal_tree.set_payload(store.build_tree_payload())
@@ -3014,6 +3384,9 @@ class MainWindow(QMainWindow):
             and self._pending_plot_type is not None
         )
         self._apply_pending_plot_type()
+        if temporary_handoff_active and self._temporary_plot_handoff.get('inheritance'):
+            signal_inheritance.restore(self, self._temporary_plot_handoff)
+            self._pending_plot_keys = []
         if self._pending_plot_keys:
             wanted       = list(self._pending_plot_keys)
             colors       = dict(self._pending_plot_colors)
@@ -3073,6 +3446,11 @@ class MainWindow(QMainWindow):
             }
         if temporary_handoff_active:
             self._temporary_plot_handoff = None
+        if self.btn_windows.isChecked() and getattr(self, '_pending_window_layout', None):
+            self.plot_panel.apply_window_layout(self._pending_window_layout)
+            self._pending_window_layout = []
+        self.plot_panel.move_cursor1(self.playback.clock.position)
+        self._playback_freshness(self.playback.clock.position)
         if load_warnings:
             shown = load_warnings[:20]
             details = '\n'.join(f'• {warning}' for warning in shown)
@@ -3250,6 +3628,7 @@ class MainWindow(QMainWindow):
         if not self._closing and not self._settle_last_session():
             event.ignore()
             return
+        self.playback.pause()
         # Every worker thread is a child of this window, and Qt terminates the
         # application when one is destroyed while it runs. None can be
         # stopped part-way, so a close during Decode, a calculation or
@@ -3284,8 +3663,47 @@ class MainWindow(QMainWindow):
         self.left_dock.setVisible(not self.left_dock.isVisible())
         self._sync_panel_toggle_buttons()
 
+    def _remember_signal_window_visibility(self, visible):
+        if self._closing:
+            return
+        if visible or self.signal_dock.isHidden():
+            self._signals_window_visible = bool(visible)
+
+    def _restore_minimized_signal_window(self, _checked=False):
+        if self.signal_dock.isMinimized():
+            self.signal_dock.showNormal()
+            self.signal_dock.raise_()
+            self.signal_dock.activateWindow()
+
     def _toggle_bottom_panel(self) -> None:
         self.bottom_dock.setVisible(not self.bottom_dock.isVisible())
+        self._sync_panel_toggle_buttons()
+
+    def _begin_panel_resize(self, name: str) -> None:
+        dock = self.left_dock if name == 'left' else self.bottom_dock
+        horizontal = name == 'left'
+        area = self.dockWidgetArea(dock)
+        direction = (1 if area == Qt.DockWidgetArea.LeftDockWidgetArea else -1) if horizontal else (
+            1 if area == Qt.DockWidgetArea.TopDockWidgetArea else -1)
+        extent = (dock.width() if horizontal else dock.height()) if dock.isVisible() and not dock.isFloating() else 0
+        available = self.centralWidget().width() if horizontal else self.centralWidget().height()
+        self._panel_resize[name] = (extent, direction, max(120, extent+available-(320 if horizontal else 140)))
+
+    def _resize_panel(self, name: str, delta: float) -> None:
+        if name not in self._panel_resize:
+            return
+        dock = self.left_dock if name == 'left' else self.bottom_dock
+        extent, direction, maximum = self._panel_resize[name]
+        requested = round(extent+direction*delta)
+        if extent == 0 and requested <= 0:
+            return  # a hidden panel opens only when dragged into the content
+        if dock.isFloating():
+            dock.setFloating(False)
+        if not dock.isVisible():
+            dock.show()
+        orientation = Qt.Orientation.Horizontal if name == 'left' else Qt.Orientation.Vertical
+        minimum = dock.minimumSizeHint().width() if name == 'left' else dock.minimumSizeHint().height()
+        self.resizeDocks([dock], [max(minimum, min(maximum, requested))], orientation)
         self._sync_panel_toggle_buttons()
 
     def _sync_panel_toggle_buttons(self) -> None:
@@ -3294,58 +3712,42 @@ class MainWindow(QMainWindow):
         self.left_toggle_btn.setText('◀' if left_visible else '▶')
         self.bottom_toggle_btn.setText('▼' if bottom_visible else '▲')
         self.left_edge_btn.setToolTip(
-            'Hide the signal panel' if left_visible else 'Show the signal panel')
+            '拖动调整日志树宽度；双击隐藏日志树' if left_visible else '双击展开日志树，或向内拖动展开')
         self.bottom_edge_btn.setToolTip(
-            'Hide the log panel' if bottom_visible else 'Show the log panel')
+            '拖动调整信息栏高度；双击隐藏信息栏' if bottom_visible else '双击展开信息栏，或向内拖动展开')
         self.left_edge_btn.setAccessibleName(self.left_edge_btn.toolTip())
         self.bottom_edge_btn.setAccessibleName(self.bottom_edge_btn.toolTip())
         self._position_panel_toggle_buttons()
 
     def _position_panel_toggle_buttons(self) -> None:
-        # Each handle lies in the gap between its panel and the plot area,
-        # centred along the panel's edge. With the panel hidden or floating
-        # it lies on the plot area's edge where the panel docks, and the plot
-        # area keeps a gap that wide on that side. Its chevron points the way
-        # the panel moves on a click.
+        # Transparent hit bands overlap the boundary, so they cost no content
+        # width/height. A collapsed panel leaves its line on the content edge.
         tab = EdgeTab.THICKNESS
-        margins = [6, 6, 6, 6]   # left, top, right, bottom
-        Arrow = Qt.ArrowType
-
+        central = self.centralWidget().geometry()
         side = self.left_edge_btn
         on_right = self.dockWidgetArea(self.left_dock) == Qt.DockWidgetArea.RightDockWidgetArea
         docked = self.left_dock.isVisible() and not self.left_dock.isFloating()
-        if not docked:
-            margins[2 if on_right else 0] = max(6, tab)
+        if docked:
+            dock = self.left_dock.geometry()
+            line = dock.left()-1 if on_right else dock.right()+1
+        else:
+            line = central.right() if on_right else central.left()
+        x = max(0, min(self.width()-tab, line-tab//2))
+        side.setGeometry(x, central.top(), tab, central.height())
+        side.set_line_offset(line-x)
+        side.raise_()
+
         bottom = self.bottom_edge_btn
         on_top = self.dockWidgetArea(self.bottom_dock) == Qt.DockWidgetArea.TopDockWidgetArea
         bottom_docked = self.bottom_dock.isVisible() and not self.bottom_dock.isFloating()
-        if not bottom_docked:
-            margins[1 if on_top else 3] = max(6, tab)
-        self._center_layout.setContentsMargins(*margins)
-
-        central = self.centralWidget().geometry()
-        if docked:
-            dock = self.left_dock.geometry()
-            x = dock.left() - tab if on_right else dock.right() + 1
-            middle = dock.center().y()
-        else:
-            x = central.right() + 1 - tab if on_right else central.left()
-            middle = central.center().y()
-        side.move(x, middle - side.height() // 2)
-        hide, show = (Arrow.RightArrow, Arrow.LeftArrow) if on_right else (Arrow.LeftArrow, Arrow.RightArrow)
-        side.set_arrow(hide if self.left_dock.isVisible() else show)
-        side.raise_()
-
         if bottom_docked:
             dock = self.bottom_dock.geometry()
-            y = dock.bottom() + 1 if on_top else dock.top() - tab
-            middle = dock.center().x()
+            line = dock.bottom()+1 if on_top else dock.top()-1
         else:
-            y = central.top() if on_top else central.bottom() + 1 - tab
-            middle = self.rect().center().x()
-        bottom.move(middle - bottom.width() // 2, y)
-        hide, show = (Arrow.UpArrow, Arrow.DownArrow) if on_top else (Arrow.DownArrow, Arrow.UpArrow)
-        bottom.set_arrow(hide if self.bottom_dock.isVisible() else show)
+            line = central.top() if on_top else central.bottom()
+        y = max(0, min(self.height()-tab, line-tab//2))
+        bottom.setGeometry(central.left(), y, central.width(), tab)
+        bottom.set_line_offset(line-y)
         bottom.raise_()
 
     def eventFilter(self, watched, event) -> bool:
@@ -3378,7 +3780,8 @@ class MainWindow(QMainWindow):
     # Actions enabled/disabled per app state
     # needs_file  = requires measurement file to be selected
     # needs_store = requires decode to have completed
-    _ACTS_ALWAYS_ENABLED = {'Open Measurement', 'Open configuration'}
+    _ACTS_ALWAYS_ENABLED = {'Open Measurement', 'Open configuration', 'Open project',
+                            'Save project', 'Project settings'}
     _ACTS_NEEDS_FILE  = {'Decode'}
     _ACTS_NEEDS_STORE = {'Save configuration', 'Calculated Signal', 'Export plotted signals',
                          'Save decoded measurement as MF4', 'Measurement info'}
@@ -3406,7 +3809,7 @@ class MainWindow(QMainWindow):
         if self._thread is not None:
             # Refused anyway while loading (see load_data); greyed out so a
             # click made while the window looks stuck does nothing at all.
-            for name in ('Open Measurement', 'Decode', 'Open configuration'):
+            for name in ('Open Measurement', 'Decode', 'Open configuration', 'Open project', 'Project settings'):
                 self._toolbar_actions[name].setEnabled(False)
         # Keep the Trace discoverable after every load. For decoded-only MDF or
         # CSV data the action explains why an authentic raw trace is unavailable.
@@ -3442,12 +3845,17 @@ class MainWindow(QMainWindow):
         mpath = self.measurement_path or self.blf_path
         lines = [
             f'File: {mpath or ""}',
+            f'Project: {self.project.get("name") or ""}',
             f'Database:  {self.dbc_path or "(not required)"}',
             f'Channels: {channels}',
             f'Frames: {frames}',
             f'Decoded Frames: {decoded}',
             f'Samples: {samples}',
         ]
+        if self.store is not None:
+            for source in getattr(self.store, 'csv_source_reports', []):
+                lines.append(f"CSV source {source['name']}: {source['signals']} signals, {source['samples']:,} samples")
+                lines.append(f"  {source['path']}")
         self.measurement_box.setPlainText('\n'.join(lines))
 
     def _log(self, message: str) -> None:

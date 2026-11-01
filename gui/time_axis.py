@@ -1,0 +1,68 @@
+"""Seconds on the common recording timeline, with readable minor ticks."""
+import math
+
+import pyqtgraph as pg
+from PySide6.QtCore import QPointF
+
+
+class TimeAxis(pg.AxisItem):
+    def __init__(self, preferred_minor=None, color='#ffffff'):
+        super().__init__('bottom')
+        self.preferred_minor = preferred_minor
+        self.setPen(pg.mkPen(color, width=1))
+        self.setTextPen(pg.mkPen(color))
+        self.enableAutoSIPrefix(False)
+        self.setStyle(tickLength=8, maxTickLevel=1, maxTextLevel=0,
+                      tickTextOffset=5, autoExpandTextSpace=True)
+
+    def drawPicture(self, painter, axisSpec, tickSpecs, textSpecs):
+        super().drawPicture(painter, axisSpec, tickSpecs, textSpecs)
+        if not self.style['showValues']:
+            return
+        # AxisItem replaces its short ticks with grid lines when showGrid is
+        # enabled. Draw the ruler separately so both remain visible.
+        pen, start, end = axisSpec
+        width = end.x() - start.x()
+        low, high = self.range
+        if width <= 0 or high <= low:
+            return
+        major = self.tickValues(low, high, width)[0][1]
+        major_x = [start.x() + (value-low) * width / (high-low) for value in major]
+        painter.save()
+        painter.setPen(pen)
+        painter.drawLine(start, end)
+        for _grid_pen, point, _other in tickSpecs:
+            x = point.x()
+            length = 8 if any(abs(x-position) < .75 for position in major_x) else 4
+            painter.drawLine(QPointF(x, start.y()), QPointF(x, start.y()+length))
+        painter.restore()
+
+    def tickValues(self, minVal, maxVal, size):
+        low, high = sorted((float(minVal), float(maxVal)))
+        span = high - low
+        if not math.isfinite(span) or span <= 0 or size <= 0:
+            return []
+        minor = self.preferred_minor
+        pixels = size * minor / span if minor else 0
+        if minor and 6 <= pixels <= 60:
+            divisions = 5 if pixels >= 18 else 10
+            major = minor * divisions
+        else:
+            target = span / max(1, int(size / 90))
+            base = 10 ** math.floor(math.log10(target))
+            major = next(step * base for step in (1, 2, 5, 10)
+                         if step * base >= target * (1 - 1e-10))
+            divisions = 5
+            minor = major / divisions
+        first = math.ceil(low / minor - 1e-9)
+        last = math.floor(high / minor + 1e-9)
+        major_ticks, minor_ticks = [], []
+        for index in range(first, min(last + 1, first + 1000)):
+            value = index * minor
+            (major_ticks if index % divisions == 0 else minor_ticks).append(value)
+        return [(major, major_ticks), (minor, minor_ticks)]
+
+    def tickStrings(self, values, scale, spacing):
+        decimals = max(0, min(6, math.ceil(-math.log10(spacing) - 1e-9))) if spacing > 0 else 3
+        threshold = .5 * 10 ** -decimals
+        return [f'{0.0 if abs(value) < threshold else value:.{decimals}f}s' for value in values]

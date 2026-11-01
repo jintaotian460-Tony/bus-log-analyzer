@@ -8,9 +8,9 @@
 Adaptive data-point display in PlotPanel.
 
 "Show Data Points" must never feed the full multi-million-sample array to a
-scatter. Points are drawn on a dedicated ScatterPlotItem that only ever holds
-the samples visible in the current X viewport, and only when that count is at
-or below PlotPanel._POINTS_VISIBLE_THRESHOLD. These tests drive
+scatter. Points are drawn on a dedicated ScatterPlotItem that holds visible
+samples, capped at PlotPanel._POINTS_VISIBLE_THRESHOLD with an explicit sparse
+display label. These tests drive
 _update_adaptive_points() directly (bypassing the debounce timer) and assert
 the scatter's point count in each layout mode.
 
@@ -104,12 +104,15 @@ def test_adaptive_points_per_mode(panel, qapp, mode):
     panel.set_show_points(True)
     qapp.processEvents()
 
-    # Zoomed OUT to full extent → far above threshold → scatter empty (line only)
+    # Zoomed out: a labelled subset of original points, never invented samples.
     _set_xrange(panel, _TS[0], _TS[-1])
     panel._update_adaptive_points()
     qapp.processEvents()
-    assert _scatter_len(panel._items["A"]) == 0
-    assert _scatter_len(panel._items["B"]) == 0
+    assert _scatter_len(panel._items["A"]) == panel._POINTS_VISIBLE_THRESHOLD
+    assert _scatter_len(panel._items["B"]) == panel._POINTS_VISIBLE_THRESHOLD
+    assert '稀疏显示' in panel.sampling_label.text()
+    shown, _ = panel._items['A'].scatter.getData()
+    assert np.isin(shown, _TS).all()
 
     # Zoomed IN to a narrow window → scatter holds exactly the sliced count
     span = (_TS[-1] - _TS[0]) * (400.0 / _N)   # ~400 points
@@ -125,6 +128,7 @@ def test_adaptive_points_per_mode(panel, qapp, mode):
     assert 0 < expected <= panel._POINTS_VISIBLE_THRESHOLD
     assert _scatter_len(panel._items["A"]) == expected
     assert _scatter_len(panel._items["B"]) == expected
+    assert '全量' in panel.sampling_label.text()
 
 
 def test_toggle_off_removes_scatters(panel, qapp):

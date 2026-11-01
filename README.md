@@ -54,7 +54,65 @@ MDF and CSV content is detected automatically. Database Manager supports per-cha
 - JSON configuration save/load for measurement paths, database mapping, calculated signals, plotted order, groups, colors, visibility, axes, cursors, markers, and display settings.
 - YAML rule-based diagnostics for expressions, ranges, fault flags, and message loss; optional GitHub Models analysis is available through `Ctrl+Shift+A`.
 
-### Plotting
+### Offline telemetry playback
+
+After decoding, use **Play / Pause**, **Restart**, the speed selector, and the
+position slider or seconds field above the plot. Cursor 1, its value columns,
+the Table and an open Trace follow the playback position. **Follow view** scrolls
+the plot without changing its Y scale. Clicking or dragging a cursor pauses
+playback at that position. The clock advances by elapsed time, including when
+the GUI briefly stalls. Reaching the end pauses; Play starts again from the start.
+
+**Stale after** marks each plotted signal separately when it has had no update
+for longer than the selected timeout. Longer gaps have amber shading and broken
+curves; cursor values say **Stale** rather than presenting a held value as a new
+measurement. Before a signal's first sample they say **No data**. Zero disables
+gap marking. Raw measurements and exported samples are unchanged. The supplied
+E702 project selects a 2-second timeout; recordings without a configured default
+start with gap marking off. Configure the DBC that matches the recorded layout.
+
+The playback bar displays absolute time when the source has an epoch time base.
+**BLF UTC → local** is the standard interpretation. Some cloud CSV-to-BLF
+converters write local clock fields into the BLF header: select **Cloud local
+wall time** for these files to retain the original clock time, avoiding a second
+timezone conversion. This is an explicit display setting, not a change to every
+BLF or to relative timestamps. Time mode, speed, timeout, position and Follow
+view are saved with the configuration; playback always reopens paused.
+
+Open a saved playback session directly with `BusLogAnalyzer.exe --config session.json`.
+This feature replays measurements on screen; it does not transmit on a CAN bus.
+
+### Projects and additional CSV signals
+
+**File → Project settings** names a project, sets its clock and freshness defaults,
+and adds CSV signal sources. Each CSV source selects its timestamp column and
+physical signal columns, its encoding and delimiter, and a time alignment rule.
+CSV signals appear under **CSV signals**, retain their own samples, and share the
+plot/playback axis with the main recording. Blank cells are missing samples;
+zero remains zero. They do not create CAN/LIN frames or alter the raw Trace.
+The importer sorts reverse-ordered exports and refuses missing columns, invalid
+timestamps, and source clocks that do not overlap the recording.
+
+For cloud converters that write local fields directly into the BLF header,
+choose **Cloud BLF header contains local clock fields** for the CSV. For a standard
+UTC BLF, choose **Absolute date/time with UTC offset** and enter the CSV's offset.
+Already aligned numeric CSV times use **Relative seconds from recording zero**.
+An additional time adjustment is explicit; no resampling or value interpolation
+is introduced. Changing only the playback display timezone does not move samples.
+
+**File → Save project** writes a reusable project profile: DBC/channel mappings,
+CSV sources and selected columns, time/freshness rules, and default plot keys.
+It excludes the specific recording and playback progress. **Open project** starts
+a fresh session; choose that project's main measurement afterward. **Save/Open
+configuration** continues to save/reopen a particular recording and its view.
+Database and fixed CSV paths are stored relative to the project file where
+possible. A source path such as `{measurement_stem}.csv` selects a same-named
+CSV beside each main recording, so a project can be reused on later logs.
+
+Project-specific DBCs, recorded data and personal project profiles stay outside
+the source repository. No E702 or ACT7 column names are built into the importer.
+
+### Plot controls
 
 - **Stacked** is the default mode and gives each signal its own lane and Y scale.
 - **Multi-Axis** overlays the signals, with one axis per unit and an optional individual axis per signal.
@@ -152,6 +210,96 @@ tests/                 Pytest regression suite
 ```
 
 Runtime dependencies are maintained in [requirements.txt](requirements.txt).
+
+## Project log browsing and cloud playback
+
+The **Log Explorer** opens a folder tree whose root is saved with the project.
+Double-clicking a supported log replaces and decodes the active measurement.
+The explorer can be hidden; **Signals** opens the separate movable floating
+signal tree. Use the toolbar actions to show either panel again.
+The floating signal tree uses standard title-bar minimize, maximize/restore
+and close buttons. Close hides only the signal window and stays hidden while
+switching logs. **Signals** restores a hidden or minimized signal window;
+saved configurations retain the visibility choice.
+
+Under **File → Project settings → CAN/LIN import matrices**, configure a fixed
+set of DBC/LDF versions, platform network numbers and exported BLF channels.
+Unassigned candidates are considered only when the frame ID and signal names
+identify one matrix uniquely. Saved matrix fingerprints reject later file
+changes until the version is reviewed in Project settings. An optional signal
+DBC expands packed telemetry fields instead of displaying their 64-bit chunks.
+
+Opening a matching cloud CSV converts it to a cached single-file playback BLF.
+**File → Save playback BLF…** saves a portable copy. The BLF includes normal
+CAN/CAN FD/LIN frame objects, decoder definitions and Osvanta observation
+markers; reopening it needs no neighbouring CSV or external database.
+Only complete, representable observations produce reconstructed bus frames.
+Partial observations retain actual values and explicit missing markers rather
+than invented payload values. Unsupported fields are listed in Diagnostics.
+Plots show **未采集** at a missing observation and retain the configured stale
+timeout and clock interpretation.
+
+These are reconstructed cloud observations, not original bus captures: wire
+ordering at equal timestamps, unobserved reserved bits, timing inside a frame
+and bus-error events cannot be recovered. Third-party BLF readers can read the
+standard frame objects; they may ignore Osvanta's sparse-observation markers.
+
+### Keep signal choices when changing recordings
+
+Double-clicking another log in the explorer carries selected signals and plot
+presentation (order, colour, groups, line style and axes) to the new recording.
+Full channel/message/signal identities match first. A unique name can match
+when its unit agrees and no explicit bus/channel conflict exists. Ambiguous
+signals remain **待确认**; right-click the inherited tree entry and choose
+**匹配到本日志信号…** to confirm a binding.
+
+Unavailable signals remain grey, labelled **本日志未匹配**, with empty samples.
+They recover when a later recording contains them. Calculated curves are
+recomputed from the new inputs. Changing between MF4/MDF and telemetry/bus
+recordings clears this handoff; opening another project also clears it.
+
+### Inspect original samples and the time ruler
+
+The **采样点** button shows original sample positions. Dense views retain a
+capped subset and explicitly display **稀疏显示，放大查看全部**; after zooming,
+**全量（当前视图）** means every sample in view is drawn. Hover a point for its
+timestamp, value and interval from the preceding original sample.
+
+The bottom time ruler has a baseline, long labelled ticks and short minor
+ticks, also when grid lines are enabled. **10 ms** focuses the cursor or view
+centre with 10 ms minor ticks; **Fit** restores the full recording. These
+controls change the view, not the recorded sampling interval. All four plot
+layouts use the same ruler.
+
+### Multi-window analysis and engineering templates
+
+**多窗口** arranges graph windows vertically, each with its own signal list.
+Click its title to select the destination, then double-click a signal or drag
+it into that window. Moving an already plotted signal transfers it to the
+destination window. **＋窗口** adds a window; arrows change its order, its close
+button removes it and its curves. Drag the thin line between two windows to
+adjust their relative heights. Windows fill the available area proportionally,
+with no outer padding or gaps; extra windows scroll at a readable minimum height.
+The last graph meets the persistent bottom time ruler on the right. Its signal
+list spans the ruler height and reaches the cursor/file information bar directly;
+there is no unused strip below the list, including after resizing or scrolling. The log explorer and
+bottom information panel also use thin divider lines: drag to resize,
+double-click to collapse or reopen. Collapsed panels keep their line at the edge.
+Each window chooses either **全部共轴** or **每条信号独立轴** for all its signals.
+Horizontal navigation and both cursors are synchronized in both directions.
+A shared time ruler stays below the scrollable windows, including at 10 ms zoom.
+
+**分析模板 → 保存当前分析为模板…** saves a named view in the active engineering
+project. The first save asks for a project file if none is linked. The menu
+applies, renames and deletes that project's templates. Templates contain signal
+identities, styles, groups, window ownership/order/heights, axis mode and Y
+limits, and the definitions required by plotted calculated signals. They do
+not contain measurement files, samples, saved time ranges or cursor positions.
+Applying one replaces the current curves and layout while retaining the open
+recording, current time range, both cursor positions and measurement events.
+Missing signals stay grey and may be confirmed manually; calculations use the
+current recording. Existing same-family inheritance and cross-family clearing
+also apply to the window layout. Project libraries remain separate.
 
 ## Security and license
 

@@ -25,6 +25,7 @@ from PySide6.QtGui import (
 )
 from PySide6.QtWidgets import (
     QAbstractItemView,
+    QScrollArea,
     QApplication,
     QInputDialog,
     QGraphicsRectItem,
@@ -50,10 +51,13 @@ from PySide6.QtWidgets import (
 
 from core.signal_statistics import range_statistics
 from core.signal_store import SignalSeries
+from core.playback import data_gaps, merge_gaps, sample_at
 from gui.tabular_view import TabularView
 from gui.edge_tab import _mix
 from gui.plot_tag import SEPARATOR, TAG_HINT, PlotTag, PlotTagDialog, current_user_name
 from gui.signal_tree import SignalTreeWidget
+from gui.time_axis import TimeAxis
+from gui import plot_windows
 
 
 # A cursor is black on a light plot background and white on a dark one.
@@ -337,6 +341,8 @@ class PlottedSignal:
     own_axis: bool = False      # multi-axis mode: detach onto individual Y axis
     multistack_id: int = -1     # MultiStack row; -1 means not assigned yet
     line_style: str = DEFAULT_LINE_STYLE   # key into LINE_STYLES
+    unavailable_reason: str = ''  # inherited presentation only; no old samples
+    window_id: int = -1
 
 
 
@@ -913,6 +919,7 @@ def _union_range(spans) -> tuple[float, float] | None:
 class PlotPanel(QWidget):
     selectionChanged = Signal(str)
     signalDropped = Signal(list)
+    signalMatchRequested = Signal(str)
     signalDroppedToStack = Signal(list, int)
     backgroundColorChanged = Signal(str)
     signalColorChanged = Signal(str, str)
@@ -933,10 +940,8 @@ class PlotPanel(QWidget):
     # the plot, as its Clear Plot button does.
     clearRequested = Signal()
 
-    # Adaptive data-point display: symbols are drawn only when the number of
-    # samples visible in the current X viewport is at or below this cap (per
-    # curve). Above it, the curve renders as a line only — this keeps huge
-    # files fast while still revealing individual samples when zoomed in.
+    # Adaptive data-point display: draw all visible samples up to this cap (per
+    # curve). Above it, draw a labelled sparse subset of actual samples.
     _POINTS_VISIBLE_THRESHOLD: int = 2000
     # Debounce for recomputing the visible point slice on X-range changes, so
     # nothing is recomputed during an interactive drag-zoom (ms).
@@ -949,9 +954,14 @@ class PlotPanel(QWidget):
     def __init__(self, parent: QWidget | None = None) -> None:
         super().__init__(parent)
         self._items: dict[str, PlottedSignal] = {}
+        plot_windows.initialise(self)
+        self._gap_timeout = 0.0
+        self._gap_regions = []
+        self._playback_readout = False
         self._current_key: str | None = None
         self._cursor_label_base = 'Click the plot to place Cursor 1'
         self._show_points = False
+        self._time_minor_spacing = None
         self._hide_lines = False
         # Each value held until the next sample; off: straight lines between them.
         self._step_lines = True
@@ -1020,7 +1030,7 @@ class PlotPanel(QWidget):
 
         # ── Normal / multi-axis plot ──────────────────────────────────────
         _left_axis = _LeftAxis()
-        self.plot = pg.PlotWidget(axisItems={'left': _left_axis}, viewBox=_ZoomViewBox(self))
+        self.plot = pg.PlotWidget(axisItems={'left': _left_axis, 'bottom': TimeAxis(color=_cursor_color_on(self._background_color))}, viewBox=_ZoomViewBox(self))
         _left_axis._panel = self  # enables multi-axis drag routing in mouseDragEvent
         self.plot.showGrid(x=True, y=True, alpha=0.25)
         self.plot.setLabel('bottom', 'Time (seconds)')
@@ -1054,6 +1064,9 @@ class PlotPanel(QWidget):
 
         # ── Stacked plot (GraphicsLayoutWidget) ──────────────────────────
         self.glw = pg.GraphicsLayoutWidget()
+        self._stacked_layout_margins = self.glw.ci.layout.getContentsMargins()
+        self._stacked_layout_spacing = (self.glw.ci.layout.horizontalSpacing(),
+                                        self.glw.ci.layout.verticalSpacing())
         self.glw.setBackground(self._background_color)
         self.glw.setAcceptDrops(True)
         self.glw.viewport().setAcceptDrops(True)
@@ -1083,7 +1096,18 @@ class PlotPanel(QWidget):
         # ── View switcher ─────────────────────────────────────────────────
         self.view_stack = QStackedWidget()
         self.view_stack.addWidget(self.plot_host)   # index 0 – normal
-        self.view_stack.addWidget(self.glw)          # index 1 – stacked
+        self._stacked_scroll = QScrollArea()
+        self._stacked_scroll.setWidgetResizable(True)
+        self._stacked_scroll.setFrameShape(QFrame.Shape.NoFrame)
+        self._stacked_scroll.setWidget(self.glw)
+        self._stacked_scroll.verticalScrollBar().valueChanged.connect(
+            lambda: plot_windows.position_grips(self))
+        self._stacked_scroll.horizontalScrollBar().valueChanged.connect(
+            lambda: plot_windows.position_grips(self))
+        self._window_layout_timer = QTimer(self)
+        self._window_layout_timer.setSingleShot(True)
+        self._window_layout_timer.timeout.connect(lambda: plot_windows.arrange(self))
+        self.view_stack.addWidget(self._stacked_scroll)  # index 1 – stacked/windows
 
         # ── Cursor readout ────────────────────────────────────────────────
         # How to plot signals is told on the empty plot, so no hint line
@@ -1225,7 +1249,8 @@ class PlotPanel(QWidget):
 
         # ── Root layout ───────────────────────────────────────────────────
         _root = QVBoxLayout(self)
-        _root.setContentsMargins(4, 4, 4, 4)
+        _root.setContentsMargins(0, 0, 0, 0)
+        _root.setSpacing(0)
         # The plots, and right of them the plotted signals as a table
         # (set_table_view). Apart from view_stack, which rebuilds switch
         # between its two plot layouts.
@@ -1243,6 +1268,7 @@ class PlotPanel(QWidget):
         self._table_view_on = False
         self._table_view_width = 0                   # the user's last width for it
         _root.addWidget(self.area_stack, stretch=1)
+        self.window_ruler = plot_windows.TimelineRuler(self)
         # The cursor line keeps a line's height under the empty plot, but no
         # width. Plotting the first signals then resizes neither the plot nor
         # the table beside it, which would draw every stacked row once more.
@@ -1253,8 +1279,15 @@ class PlotPanel(QWidget):
         _cursor_line.setSpacing(0)
         _cursor_line.addWidget(self.cursor_label)
         _cursor_line.addWidget(self.file_name_label, stretch=1)
+        self.sampling_label = QLabel()
+        self.sampling_label.setMaximumWidth(360)
+        self.sampling_label.setSizePolicy(QSizePolicy.Policy.Preferred, QSizePolicy.Policy.Preferred)
+        self.sampling_label.hide()
+        _cursor_line.addWidget(self.sampling_label)
         _root.addWidget(self._cursor_line)
         self.view_stack.installEventFilter(self)
+        self._stacked_scroll.viewport().installEventFilter(self)
+        self.glw.viewport().installEventFilter(self)
 
         self._setup_mouse_proxy()
         self._update_empty_state_ui()
@@ -1401,6 +1434,8 @@ class PlotPanel(QWidget):
                 event.ignore()
                 return
             target_stack = self._stacked_drop_target(event)
+            if self._windows_mode and target_stack is not None:
+                plot_windows.activate(self, target_stack)
             if self._multistack_mode and target_stack is not None:
                 self.signalDroppedToStack.emit(keys, target_stack)
             else:
@@ -1641,6 +1676,8 @@ class PlotPanel(QWidget):
         """
         self._show_points = bool(show)
         if not self._show_points:
+            self.sampling_label.hide()
+        if not self._show_points:
             self._hide_lines = False
         # Keep the data-point markers prominent: use a finer line while they
         # are displayed, then restore the normal line widths when hidden.
@@ -1699,6 +1736,8 @@ class PlotPanel(QWidget):
         saved_x_range = self._visible_x_range()
         self._multi_axis = bool(enabled)
         if enabled:
+            self._windows_mode = False
+            self.window_ruler.hide()
             self._stacked_mode = False
             self._multistack_mode = False
         self._apply_column_visibility()   # Ax swatch and Axis checkbox
@@ -1707,6 +1746,27 @@ class PlotPanel(QWidget):
             preserved_x_range=saved_x_range,
             preserve_y_range=False,
         )
+
+    def set_windows(self, enabled: bool) -> None:
+        saved = self._visible_x_range()
+        self._windows_mode = bool(enabled)
+        self.window_ruler.setVisible(enabled)
+        self._stacked_mode = bool(enabled)
+        self._multistack_mode = self._multi_axis = False
+        if enabled:
+            plot_windows.ensure(self)
+        self._rebuild_curves(preserved_x_range=saved, preserve_y_range=False)
+
+    def new_window(self) -> None:
+        if self._windows_mode:
+            plot_windows.add_window(self)
+
+    def window_layout(self) -> list:
+        return plot_windows.snapshot(self) if self._windows_mode else []
+
+    def apply_window_layout(self, windows, mapping=None) -> None:
+        plot_windows.apply_layout(self, windows, mapping)
+        self._rebuild_curves(preserve_y_range=False)
 
     def _visible_x_range(self) -> list[float] | None:
         """Return the X range of the plot layout currently shown to the user."""
@@ -1851,6 +1911,9 @@ class PlotPanel(QWidget):
         """Toggle INCA/CANdb-style stacked layout (one row per signal, shared X)."""
         saved_x_range = self._visible_x_range()
         self._stacked_mode = bool(enabled)
+        if enabled:
+            self._windows_mode = False
+            self.window_ruler.hide()
         self._multistack_mode = False
         if enabled:
             self._multi_axis = False
@@ -1864,6 +1927,9 @@ class PlotPanel(QWidget):
         """Toggle stacked rows that can contain multiple overlaid signals."""
         saved_x_range = self._visible_x_range()
         self._multistack_mode = bool(enabled)
+        if enabled:
+            self._windows_mode = False
+            self.window_ruler.hide()
         self._stacked_mode = bool(enabled)
         if enabled:
             self._multi_axis = False
@@ -1889,6 +1955,11 @@ class PlotPanel(QWidget):
 
     def add_series(self, key: str, series: SignalSeries, color: str | None = None) -> None:
         if key in self._items:
+            if self._windows_mode and self._items[key].window_id != self._window_active_id:
+                self._push_undo()
+                self._items[key].window_id = self._window_active_id
+                if not self._batch_mode:
+                    self.redraw()
             return
         if not self._batch_mode:
             self._push_undo()
@@ -1902,6 +1973,7 @@ class PlotPanel(QWidget):
             color=color,
             multistack_id=multistack_id,
             line_style=self._pending_line_styles.pop(key, DEFAULT_LINE_STYLE),
+            window_id=self._window_active_id if self._windows_mode else -1,
         )
         if self._current_key is None:
             self._current_key = key
@@ -1923,6 +1995,7 @@ class PlotPanel(QWidget):
         if plotted is None:
             return False
         plotted.series = series
+        plotted.unavailable_reason = ''
         # Undo snapshots must not retain the previous calculated arrays.
         for snapshot, _current_key in self._undo_stack:
             if key in snapshot:
@@ -1984,6 +2057,7 @@ class PlotPanel(QWidget):
     def discard_undo_history(self) -> None:
         """Drop snapshots when the underlying measurement is being replaced."""
         self._undo_stack.clear()
+        self._window_history.clear()
 
     def begin_batch_add(self) -> None:
         """Start a batch-add session. Suppresses per-signal rebuilds; call end_batch_add() when done."""
@@ -2005,6 +2079,7 @@ class PlotPanel(QWidget):
     # ── Internal: clear all rendered items ────────────────────────────────
 
     def _clear_rendered_items(self) -> None:
+        plot_windows.clear_renderers(self)
         # Disconnect resize hook before clearing
         if self._multi_axis_resize_hooked:
             self.plot.plotItem.vb.sigResized.disconnect(self._update_multi_axis_views)
@@ -2102,6 +2177,10 @@ class PlotPanel(QWidget):
         preserve_y_range: bool = True,
     ) -> None:
         selected = self.selected_keys() if preserve_selection else []
+        if self._windows_mode and preserve_y_range:
+            existing_ranges = {key: list(item.view_box.viewRange()[1]) for key, item in self._items.items()
+                               if item.view_box is not None}
+            self._window_y_restore = {**self._window_y_restore, **existing_ranges}
 
         # Save X and Y view ranges before destroying rendered items so that
         # add/remove operations don't snap the viewport back to full extent.
@@ -2164,7 +2243,7 @@ class PlotPanel(QWidget):
 
         self._clear_rendered_items()
 
-        if not self._items:
+        if not self._items and not self._windows_mode:
             self._refresh_table()
             self._update_empty_state_ui()
             return
@@ -2219,7 +2298,14 @@ class PlotPanel(QWidget):
             # Deferred pass (singleShot 0) runs after pyqtgraph's own
             # singleShot-0 auto-range update that setData() queues.
             _restore_stacked()
-            QTimer.singleShot(0, _restore_stacked)
+            _time_revision = self._window_time_revision
+            def _restore_stacked_deferred():
+                # A user zoom after the synchronous rebuild supersedes this
+                # old viewport. Native paint/layout events can delay the timer.
+                if self._windows_mode and self._window_time_revision != _time_revision:
+                    return
+                _restore_stacked()
+            QTimer.singleShot(0, _restore_stacked_deferred)
         else:
             self.view_stack.setCurrentIndex(0)
             self._rebuild_overlay()
@@ -2333,6 +2419,10 @@ class PlotPanel(QWidget):
         # currently-visible slice. Deferred so it runs after the range-restore
         # above has settled the viewport.
         self._connect_xrange_signals()
+        if self._windows_mode:
+            plot_windows.restore_y(self)
+            QTimer.singleShot(0, lambda: plot_windows.restore_y(self) if self._windows_mode else None)
+            plot_windows.refresh_values(self)
         if self._show_points:
             self._ensure_scatters()
             QTimer.singleShot(0, self._update_adaptive_points)
@@ -2469,7 +2559,11 @@ class PlotPanel(QWidget):
         ``multistack_id`` and overlays every member of a row on one Y scale.
         """
         visible_keys = [key for key, item in self._items.items() if item.visible]
-        if self._multistack_mode:
+        if self._windows_mode:
+            plot_windows.ensure(self)
+            rows = [(window['id'], [key for key, item in self._items.items() if item.window_id == window['id']])
+                    for window in self._window_specs]
+        elif self._multistack_mode:
             self._ensure_multistack_assignments()
             grouped: dict[int, list[str]] = {}
             for key in visible_keys:
@@ -2485,15 +2579,21 @@ class PlotPanel(QWidget):
         ref_plot: pg.PlotItem | None = None
 
         for idx, (_stack_id, row_keys) in enumerate(rows):
-            first = self._items[row_keys[0]]
+            first = self._items[row_keys[0]] if row_keys else None
+            window = self._window_specs[idx] if self._windows_mode else None
+            if window:
+                plot_windows.make_list(self, window, row_keys, idx, last=idx == n-1)
             # Use custom axis: bottom-anchored, row-clipped label
             _left_ax = _StackedLeftAxis('left')
             p: pg.PlotItem = self.glw.addPlot(
-                row=idx, col=0,
-                axisItems={'left': _left_ax},
+                row=idx, col=1 if self._windows_mode else 0,
+                axisItems={'left': _left_ax, 'bottom': TimeAxis(self._time_minor_spacing, _cursor_color_on(self._background_color))},
                 viewBox=_ZoomViewBox(self),
             )
             p.showGrid(x=True, y=True, alpha=0.25)
+            if self._windows_mode:
+                p.layout.setContentsMargins(0, 0, 0, 0)
+                p.layout.setSpacing(0)
             p.setMenuEnabled(False)
 
             names = ', '.join(self._items[key].series.signal_name for key in row_keys)
@@ -2502,6 +2602,10 @@ class PlotPanel(QWidget):
                 unit = (self._items[key].series.unit or '').strip()
                 if unit and unit not in units:
                     units.append(unit)
+            if window and window['axis_mode'] == 'individual' and row_keys:
+                first = next((self._items[key] for key in row_keys if self._items[key].visible), first)
+                names = first.series.signal_name
+                units = [first.series.unit] if first.series.unit else []
             if units:
                 ylabel = (
                     f'{names}<br><span style="font-size:80%">'
@@ -2509,14 +2613,14 @@ class PlotPanel(QWidget):
                 )
             else:
                 ylabel = names
-            p.setLabel('left', ylabel, color=first.color)
-            p.getAxis('left').setTextPen(pg.mkPen(first.color))
+            p.setLabel('left', ylabel, color=first.color if first else '#aaaaaa')
+            p.getAxis('left').setTextPen(pg.mkPen(first.color if first else '#aaaaaa'))
             p.getAxis('left').setWidth(85)
             p.showAxis('right', False)
             p.showAxis('top',   False)
 
             # X axis: tick labels only on the bottom row
-            if idx < n - 1:
+            if idx < n - 1 or self._windows_mode:
                 p.getAxis('bottom').setStyle(showValues=False)
                 p.getAxis('bottom').setLabel('')
                 p.getAxis('bottom').setHeight(0)
@@ -2526,19 +2630,30 @@ class PlotPanel(QWidget):
             # Link X axis to first row
             if ref_plot is None:
                 ref_plot = p
-            else:
+            elif not self._windows_mode:
                 p.setXLink(ref_plot)
+
+            views = {}
+            if window:
+                axis_count = max((sum(self._items[key].visible for key in keys) if spec['axis_mode'] == 'individual' else 1)
+                                 for (_identifier, keys), spec in zip(rows, self._window_specs))
+                views = plot_windows.axes_for_window(self, p, window, row_keys, max(85, axis_count*85))
 
             for key in row_keys:
                 plotted = self._items[key]
                 curve = pg.PlotDataItem()
-                p.addItem(curve)
+                view, axis = views.get(key, (p.vb, p.getAxis('left')))
+                if view is p.vb:
+                    p.addItem(curve)
+                else:
+                    view.addItem(curve)
                 # PlotItem.addItem resets clip/downsample settings, so configure
                 # only after the curve belongs to its row.
                 self._configure_curve(curve)
                 plotted.curve = curve
-                plotted.axis = p.getAxis('left')
-                plotted.view_box = p.vb
+                plotted.axis = axis
+                plotted.view_box = view
+                curve.setVisible(plotted.visible)
                 self._apply_curve_style(plotted)
 
             # Each row gets its own InfiniteLine instance.
@@ -2570,6 +2685,9 @@ class PlotPanel(QWidget):
                 stacked_menu.addAction(self.events_action)
             self._stacked_plots.append(p)
 
+        if self._windows_mode:
+            plot_windows.finish_rows(self)
+            plot_windows.link_times(self)
         # Each cursor's row lines light up together under the mouse.
         for lines in (self._stacked_c1_lines, self._stacked_c2_lines):
             for line in lines:
@@ -2583,6 +2701,7 @@ class PlotPanel(QWidget):
         Qt otherwise runs only after the rows have been drawn once. Drawn at
         the old size, every row was drawn again.
         """
+        plot_windows.arrange(self)
         for plot in self._stacked_plots:
             plot.layout.activate()
         self.glw.ci.layout.activate()
@@ -2676,6 +2795,12 @@ class PlotPanel(QWidget):
             ts = np.asarray(plotted.series.timestamps, dtype=np.float64)
             vs = np.asarray(plotted.series.values,     dtype=np.float64)
             connect, all_finite = _curve_connection(ts, vs, self._curve_connect_mask)
+            if self._gap_timeout > 0:
+                connect = self._curve_connect_mask(ts, vs)
+                for start in range(0, len(ts) - 1, _RANGE_CHUNK):
+                    stop = min(len(ts) - 1, start + _RANGE_CHUNK)
+                    connect[start:stop] &= (ts[start + 1:stop + 1] - ts[start:stop]
+                                           <= self._gap_timeout)
             _note_finite(plotted.curve, ts, all_finite or _all_finite(ts), all_finite)
             plotted.curve.setData(ts, vs, pen=pen, connect=connect,
                                   skipFiniteCheck=all_finite)
@@ -2711,6 +2836,8 @@ class PlotPanel(QWidget):
         """
         sc = pg.ScatterPlotItem(
             size=5, pen=None, brush=pg.mkBrush(plotted.color), pxMode=True,
+            hoverable=True,
+            tip=lambda x, y, data: self._sample_tooltip(plotted, int(data)),
         )
         sc.setData(x=[], y=[])
         try:
@@ -2719,6 +2846,33 @@ class PlotPanel(QWidget):
             pass
         plotted.scatter = sc
         return sc
+
+    @staticmethod
+    def _sample_tooltip(plotted, index):
+        series = plotted.series
+        time = float(series.timestamps[index])
+        value = series.display_value_at(index)
+        result = f'{series.signal_name}\nt = {time:.6f} s\n{value} {series.unit or ""}'
+        if index > 0:
+            interval = (time - float(series.timestamps[index - 1])) * 1000
+            result += f'\n距上一原始采样点 Δt = {interval:.3f} ms'
+        return result
+
+    def zoom_to_time_ticks(self, spacing=.01):
+        """Focus the existing timeline; this never creates or resamples data."""
+        vb = self._driving_vb()
+        low, high = vb.viewRange()[0]
+        cursor = self.v_line.value()
+        center = cursor if self._cursor1_enabled and low <= cursor <= high else (low + high) / 2
+        span = spacing * max(10, int(max(1, vb.width()) / 12))
+        self._time_minor_spacing = spacing
+        for plot in [self.plot.plotItem, *self._stacked_plots]:
+            plot.getAxis('bottom').preferred_minor = spacing
+            plot.getAxis('bottom').picture = None
+            plot.getAxis('bottom').update()
+        self._rebuild_seq += 1  # do not let a deferred fit undo this zoom
+        vb.setXRange(center - span / 2, center + span / 2, padding=0)
+        self._update_adaptive_points()
 
     def _ensure_scatters(self) -> None:
         """Create a scatter for every visible, rendered curve that lacks one.
@@ -2759,6 +2913,8 @@ class PlotPanel(QWidget):
         once the view stops moving, never during an interactive drag-zoom."""
         if self._show_points:
             self._points_timer.start(self._POINTS_DEBOUNCE_MS)
+        if self._windows_mode:
+            self.window_ruler.update()
         self._schedule_statistics()
 
     def _connect_xrange_signals(self) -> None:
@@ -2789,10 +2945,10 @@ class PlotPanel(QWidget):
         For each visible curve we searchsorted the (monotonic) timestamp array
         for the current X range and, if the number of samples in view is at or
         below the threshold, push just that slice into the scatter. Above the
-        threshold markers are normally omitted; in point-only mode a capped,
-        evenly sampled slice is retained so the plot can never appear empty.
+        threshold retain a labelled, capped subset of real sample positions.
         """
         if not self._show_points or not self._items:
+            self.sampling_label.hide()
             for plotted in self._items.values():
                 if plotted.scatter is not None:
                     plotted.scatter.setData(x=[], y=[])
@@ -2803,6 +2959,8 @@ class PlotPanel(QWidget):
             return
         x0, x1 = xr[0], xr[1]
         thr = self._POINTS_VISIBLE_THRESHOLD
+        sparse = False
+        details = []
         for plotted in self._items.values():
             sc = plotted.scatter
             if sc is None or not plotted.visible:
@@ -2816,14 +2974,18 @@ class PlotPanel(QWidget):
             count = hi - lo
             if 0 < count <= thr:
                 vs = np.asarray(plotted.series.values, dtype=np.float64)
-                sc.setData(x=ts[lo:hi], y=vs[lo:hi])
-            elif count > thr and self._hide_lines:
+                sc.setData(x=ts[lo:hi], y=vs[lo:hi], data=np.arange(lo, hi))
+            elif count > thr:
+                sparse = True
                 vs = np.asarray(plotted.series.values, dtype=np.float64)
                 indices = np.linspace(lo, hi - 1, num=thr, dtype=np.int64)
-                sc.setData(x=ts[indices], y=vs[indices])
+                sc.setData(x=ts[indices], y=vs[indices], data=indices)
             else:
-                # Zoomed out past the threshold (or nothing in view) → line only.
                 sc.setData(x=[], y=[])
+            details.append(f'{plotted.series.signal_name}: 显示 {min(count, thr)} / {count} 个原始点')
+        self.sampling_label.setText('采样点：稀疏显示，放大查看全部' if sparse else '采样点：全量（当前视图）')
+        self.sampling_label.setToolTip('\n'.join(details) + '\n悬停采样点可查看原始时间及相邻采样间隔。')
+        self.sampling_label.setVisible(bool(details))
 
     # ── Multi-axis geometry (called via sigResized) ───────────────────────
 
@@ -2994,6 +3156,102 @@ class PlotPanel(QWidget):
             return
         mp = self.plot.plotItem.vb.mapSceneToView(pos)
         self.h_line.setPos(mp.y())
+
+    def playback_at(self, position: float) -> None:
+        self._playback_readout = True
+        self.move_cursor1(position)
+
+    def _readout_sample(self, timestamps, position):
+        if self._playback_readout or self._gap_timeout > 0:
+            return sample_at(timestamps, position, self._gap_timeout)
+        return self._nearest_index(timestamps, position), None
+
+    def set_gap_timeout(self, timeout: float) -> None:
+        timeout = max(0.0, float(timeout))
+        if self._gap_timeout == timeout:
+            return
+        self._gap_timeout = timeout
+        for plotted in self._items.values():
+            self._apply_curve_style(plotted)
+        self._draw_data_gaps()
+        self._refresh_table_and_cursors()
+
+    def freshness_summary(self, position: float):
+        signals = [p for p in self._items.values() if p.visible]
+        if not signals:
+            return 'Plot signals to inspect freshness', 'No visible plotted signals'
+        stale = []
+        for plotted in signals:
+            index, age = sample_at(plotted.series.timestamps, position, self._gap_timeout)
+            if index is None or self._sample_missing(plotted.series, index):
+                state = 'no sample yet' if age is None else f'last update {age:.1f} s ago'
+                if index is not None:
+                    state = 'Not collected / 未采集'
+                stale.append(f'{plotted.series.signal_name}: {state}')
+        if stale:
+            return (f'NO FRESH DATA: {len(stale)}/{len(signals)} signals',
+                    '\n'.join(stale))
+        if self._gap_timeout <= 0:
+            return 'Gap marking off', 'Set Stale after to flag missing updates'
+        return f'{len(signals)} signals fresh', 'Every visible signal is within the freshness limit'
+
+    @staticmethod
+    def _sample_missing(series, index):
+        # Text-only decoded channels also have NaN numeric values.
+        return not np.isfinite(series.values[index]) and not isinstance(series.display_value_at(index), str)
+
+    def _draw_data_gaps(self) -> None:
+        for plot_item, region in self._gap_regions:
+            try:
+                plot_item.removeItem(region)
+            except RuntimeError:
+                pass  # its previous layout was destroyed
+        self._gap_regions = []
+        if self._stacked_mode and self._stacked_plots:
+            targets = zip(self._stacked_plots, self._stacked_row_keys)
+        else:
+            targets = [(self.plot.plotItem, list(self._items))]
+        for plot_item, keys in targets:
+            gaps, seen = [], set()
+            for key in keys:
+                plotted = self._items.get(key)
+                if plotted is None or not plotted.visible:
+                    continue
+                ts = plotted.series.timestamps
+                if id(ts) not in seen:
+                    seen.add(id(ts))
+                    gaps.extend(data_gaps(ts, self._gap_timeout))
+                invalid = np.flatnonzero(~np.isfinite(np.asarray(plotted.series.values)))
+                if len(invalid):
+                    invalid = np.array([i for i in invalid if self._sample_missing(plotted.series, int(i))])
+                    if len(invalid):
+                        starts = invalid[np.r_[True, np.diff(invalid) > 1]]
+                        ends = invalid[np.r_[np.diff(invalid) > 1, True]]
+                        gaps.extend((float(ts[a]), float(ts[b+1] if b+1 < len(ts) else ts[-1])) for a,b in zip(starts,ends) if b+1 < len(ts) or ts[a] < ts[-1])
+            for start, end in merge_gaps(gaps):
+                region = pg.LinearRegionItem((start, end), movable=False,
+                                             brush=pg.mkBrush(240, 165, 35, 45),
+                                             pen=pg.mkPen(240, 165, 35, 120))
+                region.setZValue(-5)
+                region.setAcceptedMouseButtons(Qt.MouseButton.NoButton)
+                region.setToolTip(f'No fresh samples in at least one signal\n'
+                                  f'{start:.3f}–{end:.3f} s ({end - start:.3f} s)')
+                plot_item.addItem(region, ignoreBounds=True)
+                self._gap_regions.append((plot_item, region))
+
+    def follow_playback_time(self, position, start, end):
+        if not self._items or end <= start:
+            return
+        view = (self._stacked_plots[0] if self._stacked_mode and self._stacked_plots
+                else self.plot.plotItem)
+        lo, hi = view.vb.viewRange()[0]
+        width = min(hi - lo, end - start)
+        if width >= 0.95 * (end - start):
+            width = min(60.0, end - start)
+        if width > 0 and (position < lo or position > hi - width * 0.15
+                          or hi - lo > width * 1.05):
+            lo = min(max(start, position - width * 0.2), max(start, end - width))
+            view.setXRange(lo, lo + width, padding=0)
 
     # ── Measurement events ────────────────────────────────────────────────
 
@@ -3315,7 +3573,7 @@ class PlotPanel(QWidget):
                           f'{stats.mean:.3f}', f'{stats.std:.3f}', f'{stats.rms:.3f}',
                           f'{stats.samples:,}'])
                 # In the signal's colour, as its name and cursor values are.
-                brush = QBrush(QColor(plotted.color if plotted is not None and plotted.visible
+                brush = QBrush(QColor(plotted.color if plotted is not None and plotted.visible and not plotted.unavailable_reason
                                       else '#606060'))
                 for offset, text in enumerate(texts):
                     col = _STAT_FIRST + offset
@@ -3344,9 +3602,20 @@ class PlotPanel(QWidget):
                 cell = self.table.item(row, col)
                 if cell is None:
                     continue
-                idx = self._nearest_index(plotted.series.timestamps, x)
-                if idx is None:
+                if plotted.unavailable_reason:
+                    cell.setText(plotted.unavailable_reason)
+                    cell.setToolTip(plotted.unavailable_reason)
                     continue
+                idx, age = self._readout_sample(plotted.series.timestamps, x)
+                if idx is None:
+                    cell.setText('No data' if age is None else f'Stale ({age:.1f} s)')
+                    cell.setToolTip('No fresh sample at this time; the last value is not a new measurement.')
+                    continue
+                if self._sample_missing(plotted.series, idx):
+                    cell.setText('未采集')
+                    cell.setToolTip('Not collected in this CSV observation; no value is substituted.')
+                    continue
+                cell.setToolTip(f'Sample age: {age:.3f} s' if age is not None else '')
                 value = plotted.series.display_value_at(idx)
                 if isinstance(value, str):
                     cell.setText(value)
@@ -3358,6 +3627,8 @@ class PlotPanel(QWidget):
             self._update_delta()
         finally:
             self.table.setUpdatesEnabled(True)
+        if self._windows_mode:
+            plot_windows.refresh_values(self)
 
     def _update_delta(self) -> None:
         """Fill the Δ column: each signal's Cursor 2 value minus its Cursor 1
@@ -3375,9 +3646,9 @@ class PlotPanel(QWidget):
                 continue
             text = ''
             if not plotted.series.has_labels:
-                i1 = self._nearest_index(plotted.series.timestamps, x1)
-                i2 = self._nearest_index(plotted.series.timestamps, x2)
-                if i1 is not None and i2 is not None:
+                i1, _ = self._readout_sample(plotted.series.timestamps, x1)
+                i2, _ = self._readout_sample(plotted.series.timestamps, x2)
+                if i1 is not None and i2 is not None and np.isfinite(plotted.series.values[i1]) and np.isfinite(plotted.series.values[i2]):
                     values = plotted.series.values
                     try:
                         text = f'{float(values[i2]) - float(values[i1]):.3f}'
@@ -3463,6 +3734,10 @@ class PlotPanel(QWidget):
                 pad = (y_max - y_min) * 0.05 if y_min != y_max else (1.0 if y_min == 0 else abs(y_min) * 0.05)
                 self.plot.setYRange(y_min - pad, y_max + pad, padding=0)
 
+        if self._windows_mode:
+            self._window_y_restore = {}
+            plot_windows.fit_individual(self)
+
     def zoom_to_time(self, t_start: float, t_end: float, margin: float = 0.5) -> None:
         """Zoom X to [t_start - margin, t_end + margin] and rescale Y to match."""
         # Cancel any deferred range-restore queued by _rebuild_curves (e.g. from
@@ -3526,6 +3801,9 @@ class PlotPanel(QWidget):
         """
         if not self._items:
             return
+        if self._windows_mode:
+            self._window_y_restore = {}
+            plot_windows.fit_individual(self, visible_only=True)
 
         def _y_range_for_visible(series, x_min: float, x_max: float):
             """Return (y_min, y_max, pad) for samples within [x_min, x_max]."""
@@ -3540,6 +3818,8 @@ class PlotPanel(QWidget):
 
         if self._stacked_mode:
             for i, row_keys in enumerate(self._stacked_row_keys):
+                if self._windows_mode and self._window_specs[i]['axis_mode'] == 'individual':
+                    continue
                 if i >= len(self._stacked_plots):
                     break
                 p = self._stacked_plots[i]
@@ -3722,6 +4002,9 @@ class PlotPanel(QWidget):
         self.glw.setBackground(color)
         self._apply_panel_background()
         cursor_color = _cursor_color_on(color)
+        for plot in [self.plot.plotItem, *self._stacked_plots]:
+            plot.getAxis('bottom').setPen(pg.mkPen(cursor_color, width=1))
+            plot.getAxis('bottom').setTextPen(pg.mkPen(cursor_color))
         for line in (self.v_line, self.v_line2,
                      *self._stacked_c1_lines, *self._stacked_c2_lines):
             line.set_color(cursor_color)
@@ -3750,11 +4033,13 @@ class PlotPanel(QWidget):
 
     def _update_empty_state_ui(self) -> None:
         has_items = bool(self._items)
+        if not has_items:
+            self.sampling_label.hide()
         self.overlay_label.setVisible((not has_items) and bool(self.overlay_label.text()))
         self.cursor_label.setVisible(has_items)
         self.file_name_label.setVisible(has_items and bool(self.file_name_label.full_text()))
         self._show_tag()
-        if has_items and self._stacked_mode:
+        if self._stacked_mode and (has_items or self._windows_mode):
             self.view_stack.setCurrentIndex(1)
         else:
             self.view_stack.setCurrentIndex(0)
@@ -3886,7 +4171,9 @@ class PlotPanel(QWidget):
                     else Qt.CheckState.Unchecked
                 )
                 chk_item.setData(Qt.ItemDataRole.UserRole, key)
-                sig_item = QTableWidgetItem(indent + self._format_signal_label(key))
+                sig_item = QTableWidgetItem(indent + self._format_signal_label(key)
+                                           + (f' — {plotted.unavailable_reason}' if plotted.unavailable_reason else ''))
+                sig_item.setToolTip(plotted.unavailable_reason)
                 sig_item.setData(Qt.ItemDataRole.UserRole, key)
                 if self._is_generated_signal_key(key):
                     generated_font = sig_item.font()
@@ -3897,7 +4184,7 @@ class PlotPanel(QWidget):
                 dl_item  = QTableWidgetItem('')
                 un_item  = QTableWidgetItem(plotted.series.unit)
                 brush = QBrush(QColor(
-                    plotted.color if plotted.visible else '#606060'
+                    plotted.color if plotted.visible and not plotted.unavailable_reason else '#888888'
                 ))
                 for item in (sig_item, c1_item, c2_item, dl_item, un_item):
                     item.setForeground(brush)
@@ -3936,6 +4223,7 @@ class PlotPanel(QWidget):
             self._fill_tabular()
         self._draw_events()   # on whichever plots the rebuild made
         self._draw_markers()
+        self._draw_data_gaps()
         # Rebuild the key→row index used by _update_table_values on every cursor drag.
         self._row_lookup = {}
         for row in range(self.table.rowCount()):
@@ -3999,12 +4287,17 @@ class PlotPanel(QWidget):
                 own_axis=v.own_axis,
                 multistack_id=v.multistack_id,
                 line_style=v.line_style,
+                unavailable_reason=v.unavailable_reason,
+                window_id=v.window_id,
             )
             for k, v in self._items.items()
         }
         self._undo_stack.append((snapshot, self._current_key))
+        if self._windows_mode:
+            self._window_history[id(snapshot)] = plot_windows.snapshot(self)
         if len(self._undo_stack) > self._UNDO_DEPTH:
-            self._undo_stack.pop(0)
+            discarded, _ = self._undo_stack.pop(0)
+            self._window_history.pop(id(discarded), None)
 
     def undo(self) -> None:
         """Restore the previous plot state (up to _UNDO_DEPTH levels)."""
@@ -4012,6 +4305,9 @@ class PlotPanel(QWidget):
             return
         snapshot, prev_key = self._undo_stack.pop()
         self._items = snapshot
+        windows = self._window_history.pop(id(snapshot), None)
+        if windows is not None:
+            plot_windows.apply_layout(self, windows)
         self._current_key = prev_key if prev_key in snapshot else next(iter(snapshot), None)
         self._rebuild_curves(preserve_selection=False)
         self._set_axis_label(self._current_key)
@@ -4070,6 +4366,8 @@ class PlotPanel(QWidget):
         self._update_empty_state_ui()
         self.plot.enableAutoRange()
         self.plot.autoRange()
+        if self._windows_mode:
+            self._rebuild_curves()
 
     def selected_keys(self) -> list[str]:
         keys: list[str] = []
@@ -4941,6 +5239,11 @@ class PlotPanel(QWidget):
         except Exception:
             return
         if btn == Qt.MouseButton.LeftButton:
+            if self._windows_mode:
+                for index, plot in enumerate(self._stacked_plots):
+                    if plot.sceneBoundingRect().contains(event.scenePos()):
+                        plot_windows.activate(self, self._window_specs[index]['id'])
+                        break
             self.table.blockSignals(True)
             self.table.clearSelection()
             self.table.setCurrentCell(-1, -1)
@@ -5180,6 +5483,9 @@ class PlotPanel(QWidget):
         # last events here while Qt does.
         if not self.__dict__:
             return False
+        if (watched in (self._stacked_scroll.viewport(), self.glw.viewport())
+                and event.type() == QEvent.Type.Resize):
+            self._window_layout_timer.start(0)
         if watched is self.view_stack and event.type() in (QEvent.Type.Resize,
                                                            QEvent.Type.Move):
             self._match_table_bottom_to_plot()

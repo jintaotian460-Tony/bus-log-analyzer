@@ -59,6 +59,7 @@ def test_plot_curve_receives_open_segment_mask():
             self.kwargs = kwargs
 
     class PanelStub:
+        _gap_timeout = 0.0
         _hide_lines = False
         _show_points = False
         _step_lines = True

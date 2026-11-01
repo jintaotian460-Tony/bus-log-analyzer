@@ -70,8 +70,50 @@ def _ldf_matrix(db_path: str):
     available, message = ldf_support_available()
     if not available:
         raise RuntimeError(message)
-    import canmatrix.formats
-    matrix = canmatrix.formats.loadp_flat(str(db_path), import_type='ldf')
+    import canmatrix
+    import ldfparser
+    # The canmatrix LDF adapter does not forward an encoding argument.
+    # Parse explicitly here; Chinese released LDFs are commonly GBK.
+    raw = Path(db_path).read_bytes()
+    try:
+        raw.decode('utf-8-sig')
+        encoding = 'utf-8-sig'
+    except UnicodeDecodeError:
+        raw.decode('gb18030')
+        encoding = 'gb18030'
+    # Use the grammar output: the object adapter rejects released wide scalar
+    # fields such as DashboardClock:64 even though their bit layout is clear.
+    ldf = ldfparser.parse_ldf_to_dict(str(db_path), encoding=encoding)
+    definitions = {s['name']: s for s in ldf.get('signals', [])}
+    encodings = {e['name']: e['values'] for e in ldf.get('signal_encoding_types', [])}
+    converters = {name: encodings[r['encoding']] for r in ldf.get('signal_representations', []) for name in r['signals']}
+    matrix = canmatrix.CanMatrix()
+    matrix.baudrate = ldf['speed']
+    for frame in ldf.get('frames', []):
+        target = canmatrix.Frame(name=frame['name'], size=frame['length'],
+                                 arbitration_id=canmatrix.ArbitrationId(frame['frame_id']))
+        target.add_transmitter(frame['publisher'])
+        for mapping in frame['signals']:
+            signal = definitions[mapping['signal']]
+            item = canmatrix.Signal(name=signal['name'], start_bit=mapping['offset'],
+                                    size=signal['width'], is_signed=False)
+            initial = signal['init_value']
+            item.initial_value = int.from_bytes(bytes(initial), 'little') if isinstance(initial, list) else initial
+            for subscriber in signal['subscribers']:
+                item.add_receiver(subscriber)
+            physical = [v for v in converters.get(signal['name'], []) if v['type'] == 'physical']
+            if len({(v['scale'], v['offset']) for v in physical}) > 1:
+                raise RuntimeError(f"Piecewise LDF scaling needs explicit support: {signal['name']}")
+            for value in converters.get(signal['name'], []):
+                if value['type'] == 'logical':
+                    item.add_values(value['value'], value.get('text') or '')
+                elif value['type'] == 'physical':
+                    item.factor, item.offset, item.unit = value['scale'], value['offset'], value.get('unit') or ''
+                    item.min, item.max = value['min'], value['max']
+                    item.scale_ranges.append(dict(min=value['min'], max=value['max'],
+                                                  factor=value['scale'], offset=value['offset'], unit=value.get('unit') or ''))
+            target.add_signal(item)
+        matrix.add_frame(target)
     if matrix is None or not matrix.frames:
         raise RuntimeError(f"No LIN cluster found in '{Path(db_path).name}'.")
     return matrix

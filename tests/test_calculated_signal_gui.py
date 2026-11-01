@@ -91,6 +91,7 @@ def test_stacked_plot_is_enabled_by_default(window):
 
 
 def test_data_point_toggle_thins_then_restores_curve(window):
+    window.btn_points.setChecked(False)
     key = window.store.all_keys()[0]
     window.add_signals_to_plot([key])
     window.plot_panel.table.clearSelection()
@@ -107,6 +108,7 @@ def test_data_point_toggle_thins_then_restores_curve(window):
 
 
 def test_hide_line_requires_data_points_and_restores_line(window):
+    window.btn_points.setChecked(False)
     key = window.store.all_keys()[0]
     window.add_signals_to_plot([key])
     plotted = window.plot_panel._items[key]

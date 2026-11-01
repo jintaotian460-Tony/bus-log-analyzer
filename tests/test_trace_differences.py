@@ -341,6 +341,17 @@ def test_following_waits_for_the_cursor_to_rest(dialog, qapp):
     assert _time_of_current(dialog) == pytest.approx(0.15)
 
 
+def test_playback_updates_trace_immediately_without_cursor_feedback(dialog):
+    asked = []
+    dialog.timeClicked.connect(asked.append)
+    dialog.follow_time(0.05)
+    assert dialog._follow_timer.isActive()
+    dialog.follow_time(0.2555, immediate=True)
+    assert _time_of_current(dialog) == pytest.approx(0.251)
+    assert not dialog._follow_timer.isActive()
+    assert not asked
+
+
 def test_a_frame_off_screen_is_scrolled_to(qapp, monkeypatch, tmp_path):
     from gui import raw_frame_dialog
     monkeypatch.setattr(raw_frame_dialog, '_WINDOW', 10)

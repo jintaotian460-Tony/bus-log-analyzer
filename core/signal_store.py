@@ -662,6 +662,21 @@ class SignalStore:
         self._sample_file = None
         self._sample_file_refused = False
 
+    def remove_message_series(self, channel, message_name):
+        """Replace reconstructed physical observations without duplicate samples."""
+        channel = as_channel_key(channel)
+        for key, series in list(self._series_by_key.items()):
+            if series.channel == channel and series.message_name == message_name:
+                self.total_samples -= len(series.timestamps)
+                del self._series_by_key[key]
+                self._unsorted_keys.discard(key)
+                self._shared_ts_keys.discard(key)
+        self._signals_by_channel_message[channel].pop(message_name, None)
+        self._msg_series_cache.pop((channel, message_name), None)
+        self.message_hits.pop((channel, message_name), None)
+        self._last_bulk_ts = None
+        self._tree_dirty = True
+
     # ── Decoder integration (called once by LoadWorker) ──────────────────
 
     def set_choices_lookup(

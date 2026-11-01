@@ -39,6 +39,7 @@ def window(qapp, monkeypatch):
 
 
 def _set_layout(qapp, window, layout):
+    window.btn_windows.setChecked(False)
     window.btn_stacked.setChecked(layout == 'stacked')
     window.btn_multi_axis.setChecked(layout == 'multi-axis')
     qapp.processEvents()
@@ -162,7 +163,7 @@ def test_fit_to_window_leaves_cursors_inside_the_recording_alone(qapp, window):
     window.btn_fit.click()
     qapp.processEvents()
 
-    assert _cursors(panel) == ([3.0] * 2, [17.5] * 2)
+    assert _cursors(panel) == ([3.0], [17.5])
 
 
 def test_fit_to_window_brings_back_a_cursor_dragged_past_the_end(qapp, window):

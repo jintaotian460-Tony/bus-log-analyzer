@@ -32,6 +32,7 @@ def window(qapp, monkeypatch):
     monkeypatch.setattr(QMessageBox, "information", Mock(return_value=QMessageBox.StandardButton.Ok))
 
     w = MainWindow('Osvanta Bus Log Analyzer', '00.00.99')
+    w.btn_stacked.setChecked(True)
     monkeypatch.setattr(w, 'load_data', Mock())
     w.resize(1400, 800)
     w.show()

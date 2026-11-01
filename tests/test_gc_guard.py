@@ -94,6 +94,7 @@ _RELOAD_SCRIPT = r"""
 import gc, json, sys, threading, time
 from PySide6.QtCore import QObject, Qt
 from PySide6.QtWidgets import QApplication, QFileDialog, QMessageBox
+from shiboken6 import isValid
 
 measurement = sys.argv[1]
 app = QApplication(sys.argv[:1])
@@ -112,7 +113,7 @@ destroyed, tracked = [], set()
 def track():
     for obj in gc.get_objects():
         if (isinstance(obj, QObject) and id(obj) not in tracked
-                and type(obj).__module__.startswith("pyqtgraph")):
+                and type(obj).__module__.startswith("pyqtgraph") and isValid(obj)):
             tracked.add(id(obj))
             obj.destroyed.connect(
                 lambda *_, name=type(obj).__name__:

@@ -113,6 +113,7 @@ def test_opening_new_measurement_clears_stale_state_and_uses_plot_message(
         {1: {"OldMessage": ["OldSignal"]}}
     )
     window.plot_panel.add_series(old_series.key, old_series)
+    expected_window_layout = window.plot_panel.window_layout()
 
     window.choose_blf()
 
@@ -120,7 +121,8 @@ def test_opening_new_measurement_clears_stale_state_and_uses_plot_message(
     assert saved == {
         "type": "canscope_temporary_plot_config",
         "version": 2,
-        "plot_type": "stacked",
+        "plot_type": "windows",
+        "window_layout": expected_window_layout,
         "signals": [
             {
                 "key": old_series.key,
@@ -198,7 +200,8 @@ def test_load_decode_restores_plot_handoff_and_keeps_missing_signals(
     assert restored.group == "Powertrain"
     assert restored.axis_visible is False
     assert restored.own_axis is True
-    assert window.btn_multi_axis.isChecked()
+    assert window.btn_windows.isChecked()
+    assert not window.btn_multi_axis.isChecked()
     assert not window.btn_stacked.isChecked()
     assert window._temporary_plot_handoff is None
     assert window.plot_panel._items[missing.key].unavailable_reason == '本日志未匹配'

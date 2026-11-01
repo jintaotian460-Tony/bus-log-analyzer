@@ -13,10 +13,7 @@ from gui import signal_inheritance
 
 def capture(window):
     panel = window.plot_panel
-    mode = ('windows' if window.btn_windows.isChecked() else
-            'multistack' if window.btn_multistack.isChecked() else
-            'stacked' if window.btn_stacked.isChecked() else
-            'multi_axis' if window.btn_multi_axis.isChecked() else 'normal')
+    mode = 'windows'
     styles = [dict(key=key, **{field: getattr(item, field) for field in STYLE_FIELDS})
               for key, item in panel._items.items()]
     handoff = signal_inheritance.capture(window, {'signals': styles, 'plot_type': mode}) or {}

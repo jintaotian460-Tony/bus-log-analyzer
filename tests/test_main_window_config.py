@@ -65,49 +65,36 @@ def test_plot_toolbar_does_not_show_remove_selected_button(window):
     assert 'Remove Selected' not in button_labels
 
 
-def test_plot_toolbar_uses_one_layout_menu_with_legacy_controls(window):
+def test_plot_toolbar_has_multi_window_only_and_no_layout_selector(window):
     from PySide6.QtWidgets import QPushButton
+    import pytest
 
-    visible_text_buttons = [
-        button for button in window.plot_button_row._buttons
-        if isinstance(button, QPushButton)
-    ]
     legacy = (window.btn_multi_axis, window.btn_stacked,
               window.btn_multistack, window.btn_windows)
 
-    assert window.plot_button_row._buttons[0] is window.plot_layout_menu
+    assert not hasattr(window, 'plot_layout_menu')
+    assert window.plot_button_row._buttons[0] is window.btn_new_window
     assert all(button.parentWidget() is window for button in legacy)
-    assert all(not button.isVisible() for button in legacy)
-    assert all(button not in visible_text_buttons for button in legacy)
-    assert window.plot_layout_menu.text() == '布局：自动堆叠'
+    assert all(not button.isVisibleTo(window) for button in legacy)
+    assert all(not button.isEnabled() for button in legacy[:-1])
+    assert window.btn_windows.isChecked()
+    assert window.plot_panel._windows_mode
+    assert window.btn_new_window.isEnabled()
 
-    actions = window.plot_layout_menu.menu().actions()
-    assert [action.text() for action in actions] == ['单图', '多轴', '自动堆叠', '手动堆叠', '多窗口']
-    assert actions[2].isChecked()
-    assert actions[0].actionGroup().isExclusive()
-
-    window.btn_windows.setChecked(True)
-    assert window.plot_layout_menu.text() == '布局：多窗口'
-    assert [action.text() for action in actions if action.isChecked()] == ['多窗口']
-
-    window._set_plot_layout('normal')
-    assert window.plot_layout_menu.text() == '布局：单图'
-    assert not any(button.isChecked() for button in legacy)
+    window._set_plot_layout('windows')
+    assert window.plot_panel._windows_mode
+    with pytest.raises(ValueError):
+        window._set_plot_layout('normal')
 
 
-def test_multistack_plot_mode_is_mutually_exclusive(window):
-    window.btn_multistack.setChecked(True)
+def test_old_layout_handoffs_normalize_to_windows(window):
+    window._pending_plot_type = 'stacked'
+    window._apply_pending_plot_type()
 
-    assert window.btn_multistack.isChecked()
-    assert not window.btn_stacked.isChecked()
-    assert not window.btn_multi_axis.isChecked()
-    assert window.plot_panel._multistack_mode
-
-    window.btn_stacked.setChecked(True)
-
-    assert window.btn_stacked.isChecked()
-    assert not window.btn_multistack.isChecked()
-    assert not window.plot_panel._multistack_mode
+    assert window.btn_windows.isChecked()
+    assert window.plot_panel._windows_mode
+    assert window._configuration_dict()['windows'] is True
+    assert window._configuration_dict()['stacked'] is False
 
 
 def test_partial_measurement_load_warns_but_keeps_finished_store(window):

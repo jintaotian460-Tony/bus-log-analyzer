@@ -81,9 +81,9 @@ def _wait_for_calculation(window: MainWindow, qapp: QApplication) -> None:
     assert window._calc_thread is None
 
 
-def test_stacked_plot_is_enabled_by_default(window):
-    assert window.btn_stacked.isChecked()
-    assert window.plot_panel._stacked_mode
+def test_windows_plot_is_enabled_by_default(window):
+    assert window.btn_windows.isChecked()
+    assert window.plot_panel._windows_mode
 
     window.add_signals_to_plot([window.store.all_keys()[0]])
 

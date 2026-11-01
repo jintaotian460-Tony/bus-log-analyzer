@@ -34,6 +34,10 @@ def test_project_tree_float_and_auto_decode(qapp, tmp_path, monkeypatch):
         assert window.log_explorer.root_path == str(second)
         assert window.measurement_path is None
     finally:
+        explorer = window.log_explorer
+        explorer.set_root('')
+        explorer.tree.setRootIndex(explorer.model.index(''))
+        explorer.model.setRootPath('')
         window.close()
         qapp.processEvents()
 
@@ -93,6 +97,155 @@ def test_real_double_click_loads_once_and_hiding_survives_log_switch(qapp, tmp_p
         assert window.signal_dock.isHidden()
         assert not window._configuration_dict()['panels']['signals_visible']
     finally:
+        _stop_file_system_watch(window.log_explorer)
+        window.close()
+        qapp.processEvents()
+
+
+def _stop_file_system_watch(explorer):
+    explorer.set_root('')
+    explorer.tree.setRootIndex(explorer.model.index(''))
+    explorer.model.setRootPath('')
+
+
+def test_log_tree_context_menu_entries(qapp, tmp_path, monkeypatch):
+    import time
+    from PySide6.QtCore import Qt
+    from gui.main_window import MainWindow
+
+    monkeypatch.setattr(QMessageBox, 'warning', Mock())
+    root = tmp_path / 'logs'
+    package = root / 'case'
+    package.mkdir(parents=True)
+    source = package / 'Recorder.csv'
+    source.write_text('Timestamps [s],X\n0,10\n', encoding='utf-8')
+
+    window = MainWindow('Log file operations test', 'test')
+    explorer = window.log_explorer
+    try:
+        explorer.set_root(str(root))
+        index = explorer.model.index(str(source))
+        deadline = time.monotonic() + 5
+        while not index.isValid() and time.monotonic() < deadline:
+            qapp.processEvents()
+            index = explorer.model.index(str(source))
+        assert index.isValid()
+        explorer.tree.setCurrentIndex(index)
+        qapp.processEvents()
+
+        assert explorer.tree.contextMenuPolicy() == Qt.ContextMenuPolicy.CustomContextMenu
+        menu = explorer._context_menu(source)
+        labels = [action.text() for action in menu.actions() if action.text()]
+        assert '打开所在文件夹' in labels
+        assert '复制路径' in labels
+        assert '复制' in labels
+        assert '压缩为 ZIP' in labels
+        assert '粘贴到此处' in labels
+
+        _stop_file_system_watch(explorer)
+        archive = root / 'case.zip'
+        archive.write_bytes(b'PK\x03\x04')
+        menu = explorer._context_menu(archive)
+        assert '解压 ZIP' in [action.text() for action in menu.actions() if action.text()]
+    finally:
+        _stop_file_system_watch(window.log_explorer)
+        window.close()
+        qapp.processEvents()
+
+
+def test_log_tree_basic_file_operations(qapp, tmp_path, monkeypatch):
+    from PySide6.QtWidgets import QApplication
+    from gui.main_window import MainWindow
+
+    monkeypatch.setattr(QMessageBox, 'warning', Mock())
+    root = tmp_path / 'logs'
+    package = root / 'case'
+    package.mkdir(parents=True)
+    source = package / 'Recorder.csv'
+    source.write_text('Timestamps [s],X\n0,10\n', encoding='utf-8')
+    (package / 'notes').mkdir()
+    (package / 'notes' / 'note.txt').write_text('keep me', encoding='utf-8')
+    paste_target = root / 'paste'
+    paste_target.mkdir()
+
+    window = MainWindow('Log file operations test', 'test')
+    explorer = window.log_explorer
+    try:
+        explorer._copy_files([source])
+        explorer._paste_files(paste_target)
+        copied = paste_target / source.name
+        assert copied.read_text(encoding='utf-8').startswith('Timestamps')
+
+        explorer._compress_to_zip([package])
+        archive = root / 'case.zip'
+        assert archive.is_file()
+        explorer._extract_zip(archive)
+        extracted = root / 'case'
+        assert (extracted / 'Recorder.csv').read_text(encoding='utf-8').startswith('Timestamps')
+        assert (extracted / 'notes' / 'note.txt').read_text(encoding='utf-8') == 'keep me'
+
+        menu = explorer._context_menu(archive)
+        assert '解压 ZIP' in [action.text() for action in menu.actions() if action.text()]
+        assert not QMessageBox.warning.called
+        QApplication.clipboard().clear()
+    finally:
+        _stop_file_system_watch(explorer)
+        window.close()
+        qapp.processEvents()
+
+
+def test_log_tree_file_operations_never_overwrite_and_reject_zip_escape(
+        qapp, tmp_path, monkeypatch):
+    import zipfile
+    from PySide6.QtWidgets import QApplication
+    from gui.main_window import MainWindow
+
+    warning = Mock()
+    monkeypatch.setattr(QMessageBox, 'warning', warning)
+    root = tmp_path / 'logs'
+    package = root / 'case'
+    paste = root / 'paste'
+    package.mkdir(parents=True)
+    paste.mkdir()
+    source = package / 'Recorder.csv'
+    source.write_text('new recording', encoding='utf-8')
+    existing_copy = paste / 'Recorder.csv'
+    existing_copy.write_text('existing copy', encoding='utf-8')
+    existing_archive = root / 'case.zip'
+    existing_archive.write_text('existing archive', encoding='utf-8')
+    existing_extract = root / 'case (1)'
+    existing_extract.mkdir()
+    (existing_extract / 'keep.txt').write_text('existing folder', encoding='utf-8')
+
+    window = MainWindow('Safe file operations test', 'test')
+    explorer = window.log_explorer
+    try:
+        explorer._copy_files([source])
+        explorer._paste_files(paste)
+        assert existing_copy.read_text(encoding='utf-8') == 'existing copy'
+        assert (paste / 'Recorder (1).csv').read_text(encoding='utf-8') == 'new recording'
+
+        explorer._compress_to_zip([package])
+        assert existing_archive.read_text(encoding='utf-8') == 'existing archive'
+        safe_archive = root / 'case (1).zip'
+        assert safe_archive.is_file()
+
+        explorer._extract_zip(safe_archive)
+        assert (existing_extract / 'keep.txt').read_text(encoding='utf-8') == 'existing folder'
+        extracted = root / 'case (1) (1)'
+        assert (extracted / 'case' / 'Recorder.csv').read_text(encoding='utf-8') == 'new recording'
+
+        unsafe_archive = root / 'unsafe.zip'
+        with zipfile.ZipFile(unsafe_archive, 'w') as archive:
+            archive.writestr('../escaped.txt', 'must not escape')
+        explorer._extract_zip(unsafe_archive)
+        assert not (root.parent / 'escaped.txt').exists()
+        assert not (root / 'unsafe').exists()
+        assert warning.call_count == 1
+        assert 'unsafe entry' in warning.call_args.args[-1]
+    finally:
+        QApplication.clipboard().clear()
+        _stop_file_system_watch(explorer)
         window.close()
         qapp.processEvents()
 

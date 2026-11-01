@@ -207,6 +207,8 @@ class ScenarioDriver(QObject):
                 self._panels(record)
             elif step['op'] == 'explorer_hidden_load':
                 yield from self._explorer_hidden_load(record)
+            elif step['op'] == 'log_file_operations':
+                yield from self._log_file_operations(record)
             elif step['op'] == 'signal_window_controls':
                 yield from self._signal_window_controls(record)
             elif step['op'] == 'signal_inheritance':
@@ -323,7 +325,7 @@ class ScenarioDriver(QObject):
         if store is None:
             record['outcome'] = 'nothing to plot'
             return
-        window.btn_stacked.setChecked(True)
+        window.btn_windows.setChecked(True)
         keys = sorted(store.all_keys())[:TIMED_PLOT_SIGNALS]
         with _Collections() as collections:
             started = time.perf_counter()
@@ -356,8 +358,7 @@ class ScenarioDriver(QObject):
         window.add_signals_to_plot(sorted(store.all_keys())[:PLOTTED_SIGNALS])
         record['plotted'] = len(window.plot_panel.plotted_keys())
         yield from self._wait(0.3)
-        for button in (window.btn_stacked, window.btn_multi_axis, window.btn_multistack,
-                       window.btn_cursor1, window.btn_cursor2):
+        for button in (window.btn_cursor1, window.btn_cursor2):
             for _ in range(2):  # on, then off
                 button.click()
                 yield from self._wait(0.2)
@@ -501,6 +502,73 @@ class ScenarioDriver(QObject):
         finally:
             explorer.fileActivated.disconnect(request_received)
 
+    def _log_file_operations(self, record: dict):
+        """Exercise the real log-tree context menu and safe ZIP operations."""
+        from PySide6.QtCore import Qt
+        from PySide6.QtTest import QTest
+        from PySide6.QtWidgets import QApplication, QMenu
+
+        window = self._window
+        root = self._result_path.with_name(self._result_path.stem + '-log-ops')
+        package = root / 'case'
+        destination = root / 'paste'
+        package.mkdir(parents=True, exist_ok=True)
+        destination.mkdir(exist_ok=True)
+        source = package / 'Recorder.csv'
+        source.write_text('Timestamps [s],X\n0,10\n', encoding='utf-8')
+        notes = package / 'notes'
+        notes.mkdir()
+        (notes / 'note.txt').write_text('keep me', encoding='utf-8')
+
+        explorer = window.log_explorer
+        window.left_dock.show()
+        explorer.set_root(str(root))
+        tree = explorer.tree
+        yield from self._wait(0.2)
+        menu = explorer._context_menu(source)
+        menu.popup(tree.viewport().mapToGlobal(tree.viewport().rect().center()))
+        yield from self._wait(0.2)
+        labels = [action.text() for action in menu.actions()] if isinstance(menu, QMenu) else []
+        record['context_menu'] = isinstance(menu, QMenu)
+        record['menu_items'] = labels
+        record['required_items'] = all(
+            label in labels for label in ('打开所在文件夹', '复制路径', '复制', '压缩为 ZIP', '粘贴到此处'))
+        if isinstance(menu, QMenu):
+            menu.grab().save(str(self._result_path.with_suffix('.log-menu.png')))
+            menu.close()
+
+        explorer._copy_files([source])
+        explorer._paste_files(destination)
+        copied = destination / source.name
+        explorer._compress_to_zip([package])
+        archive = root / 'case.zip'
+        explorer._extract_zip(archive)
+        extracted = root / 'case'
+
+        zip_menu = explorer._context_menu(archive)
+        zip_labels = [action.text() for action in zip_menu.actions()]
+        record['extract_menu_item'] = '解压 ZIP' in zip_labels
+        zip_menu.popup(tree.viewport().mapToGlobal(tree.viewport().rect().center()))
+        yield from self._wait(0.2)
+        zip_menu.grab().save(str(self._result_path.with_suffix('.log-extract-menu.png')))
+        zip_menu.close()
+
+        record['copied'] = copied.is_file() and copied.read_text(encoding='utf-8').startswith('Timestamps')
+        record['zipped'] = archive.is_file()
+        record['extracted'] = (
+            (extracted / 'Recorder.csv').is_file()
+            and (extracted / 'notes' / 'note.txt').read_text(encoding='utf-8') == 'keep me')
+        record['path_clipboard'] = QApplication.clipboard().text() == ''
+        explorer._copy_paths_to_clipboard([source])
+        record['path_clipboard'] = QApplication.clipboard().text() == str(source)
+        QApplication.clipboard().clear()
+        explorer.set_root('')
+        record['outcome'] = (
+            'passed' if all((record['context_menu'], record['required_items'],
+                             record.get('extract_menu_item'), record['copied'],
+                             record['zipped'], record['extracted'], record['path_clipboard']))
+            else 'failed')
+
     def _signal_inheritance(self, record: dict):
         """Exercise file replacement through actual explorer double-click events."""
         from PySide6.QtCore import Qt
@@ -594,11 +662,8 @@ class ScenarioDriver(QObject):
         QTest.mouseClick(window.btn_points, Qt.MouseButton.LeftButton)
         assert panel._show_points
         record['layouts'] = []
-        for mode in ('normal', 'stacked', 'multi_axis', 'multistack'):
-            for button in (window.btn_stacked, window.btn_multi_axis, window.btn_multistack):
-                button.setChecked(False)
-            if mode != 'normal':
-                QTest.mouseClick(getattr(window, 'btn_' + mode), Qt.MouseButton.LeftButton)
+        for mode in ('windows',):
+            window.btn_windows.setChecked(True)
             QTest.mouseClick(window.btn_fit, Qt.MouseButton.LeftButton)
             yield from self._wait(.2)
             panel._update_adaptive_points()
@@ -626,7 +691,7 @@ class ScenarioDriver(QObject):
             assert panel.sampling_label.isVisible() and panel.sampling_label.width() > 100
             record['layouts'].append({'mode': mode, 'minor_seconds': levels[1][0],
                                       'real_samples': True, 'visible_counts': counts, 'density_label': dense_label})
-            if mode == 'stacked':
+            if mode == 'windows':
                 window.screen().grabWindow(int(window.winId())).save(str(self._result_path.with_suffix('.detail-stacked.png')))
                 scatter = panel._items[keys[0]].scatter
                 x, y = scatter.getData()
@@ -677,8 +742,11 @@ class ScenarioDriver(QObject):
                 raise RuntimeError('Window recording load timed out')
             yield
         window.plot_panel.clear_all()
-        QTest.mouseClick(window.btn_windows, Qt.MouseButton.LeftButton)
+        window.btn_windows.setChecked(True)
         panel = window.plot_panel
+        plot_windows.apply_layout(panel, [dict(
+            id=0, name='窗口 1', axis_mode='shared', height=220,
+            keys=[], y_ranges={})])
         keys = window.store.all_keys()[:4]
         window.add_signals_to_plot(keys[:2])
         QTest.mouseClick(window.btn_new_window, Qt.MouseButton.LeftButton)
@@ -751,7 +819,6 @@ class ScenarioDriver(QObject):
         panel.move_cursor1(12)
         panel.move_cursor2(13)
         store, recording = window.store, window.measurement_path
-        window.btn_stacked.setChecked(True)
         panel.clear_all()
         window.add_signal_to_plot(keys[-1])
         yield from self._wait(.2)
@@ -951,9 +1018,8 @@ class ScenarioDriver(QObject):
         record['line_widths'] = list(LINE_WIDTHS)
         window._set_line_width(.5)
         record['ruler_layouts'] = []
-        for mode in ('windows', 'stacked'):
-            window.btn_windows.setChecked(mode == 'windows')
-            window.btn_stacked.setChecked(mode == 'stacked')
+        for mode in ('windows',):
+            window.btn_windows.setChecked(True)
             panel.set_cursor1_enabled(True)
             panel.set_cursor2_enabled(True)
             panel.move_cursor1(12)
@@ -967,13 +1033,8 @@ class ScenarioDriver(QObject):
             views.update(vb for _, vb in panel._extra_axes)
             before_y = {other: list(other.viewRange()[1]) for other in views}
             width = view.sceneBoundingRect().width()
-            if mode == 'windows':
-                target = panel.window_ruler
-                start = QPointF(target.width()/2, 18)
-            else:
-                axis = panel._stacked_plots[-1].getAxis('bottom')
-                target = panel.glw.viewport()
-                start = QPointF(panel.glw.mapFromScene(axis.mapToScene(QPointF(axis.size().width()/2, 12))))
+            target = panel.window_ruler
+            start = QPointF(target.width()/2, 18)
             def send(kind, point, button, buttons):
                 global_point = QPointF(target.mapToGlobal(point.toPoint()))
                 event = QMouseEvent(kind, point, global_point, button, buttons, Qt.KeyboardModifier.NoModifier)

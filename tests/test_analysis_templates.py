@@ -159,16 +159,17 @@ def test_template_calculations_use_the_new_recording_after_group_rename(window, 
     assert not window.plot_panel._items[definition.key].unavailable_reason
 
 
-def test_template_restores_explicit_y_limits_in_legacy_plot_mode(window, qapp):
-    window.btn_stacked.setChecked(False)
+def test_template_restores_explicit_y_limits_in_windows_mode(window, qapp):
     window.add_signal_to_plot('CH1::A::Target')
-    window.plot_panel.plot.setYRange(10, 20, padding=0)
+    view = window.plot_panel._items['CH1::A::Target'].view_box
+    assert view is not None
+    view.setYRange(10, 20, padding=0)
     qapp.processEvents()
     template = analysis_templates.capture(window)
-    window.plot_panel.plot.setYRange(0, 100, padding=0)
+    view.setYRange(0, 100, padding=0)
     analysis_templates.apply(window, template)
     qapp.processEvents()
-    assert window.plot_panel.plot.plotItem.vb.viewRange()[1] == pytest.approx([10, 20])
+    assert window.plot_panel._items['CH1::A::Target'].view_box.viewRange()[1] == pytest.approx([10, 20])
 
 
 def test_regular_configuration_roundtrip_preserves_window_ownership(window, qapp, monkeypatch):

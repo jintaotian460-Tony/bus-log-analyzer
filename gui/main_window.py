@@ -138,15 +138,9 @@ def prescan_measurement(*args, **kwargs):
 # keeps the two equal.
 _MEASUREMENT_SUFFIXES = ('.asc', '.blf', '.csv', '.mdf', '.mf4', '.trc')
 
-# The one visible plot-layout menu. The legacy checkable buttons remain for
-# saved sessions and release-test automation, but are no longer toolbar items.
-_PLOT_LAYOUTS = (
-    ('normal', '单图', 'One plot and one shared Y axis.'),
-    ('multi_axis', '多轴', 'Signals overlay in one plot; units get their own Y axes.'),
-    ('stacked', '自动堆叠', 'Signals are grouped into lanes automatically, normally by unit.'),
-    ('multistack', '手动堆叠', 'Lanes hold several signals; drag a signal into a lane to overlay it.'),
-    ('windows', '多窗口', 'Each window has its own signal list; all windows share time and cursors.'),
-)
+# Plotting is deliberately multi-window only. The checkable controls below
+# remain disabled compatibility handles for old automation; saved layouts are
+# normalized to windows before they can reach the user interface.
 
 # The logo's height in the status bar: the smallest at which OSVANTA, under
 # the name, can still be read. The bar grows by a few pixels to hold it.
@@ -394,6 +388,7 @@ class MainWindow(QMainWindow):
         from gui.log_explorer import LogExplorer
         self.log_explorer = LogExplorer()
         self.log_explorer.fileActivated.connect(lambda path: self.open_measurement_path(path, auto_decode=True))
+        self.log_explorer.operationCompleted.connect(self._log)
         self.log_explorer.rootChanged.connect(self._log_root_changed)
         self.signal_tree = SignalTreeWidget()
         self.plot_panel = PlotPanel()
@@ -441,48 +436,29 @@ class MainWindow(QMainWindow):
                                          'Rectangle Zoom (Z): drag a box on the plot to zoom into it,\n'
                                          'Shift+drag to zoom out, double-click to see the whole recording')
         self.btn_zoom_rect.setCheckable(True)
-        # Compatibility controls: saved sessions, release tests and keyboard
-        # automation still address these buttons. The visible toolbar exposes
-        # the mutually-exclusive modes through one menu instead of four buttons.
+        # Disabled compatibility handles for old automation only. Product UI and
+        # restored configurations normalize every layout to multi-window.
         self.btn_multi_axis = QPushButton('Multi-Axis')
         self.btn_multi_axis.setCheckable(True)
-        self.btn_multi_axis.setToolTip(_PLOT_LAYOUTS[1][2])
+        self.btn_multi_axis.setEnabled(False)
         self.btn_multi_axis.setVisible(False)
         self.btn_stacked = QPushButton('Stacked')
         self.btn_stacked.setCheckable(True)
-        self.btn_stacked.setChecked(True)  # default plot mode on app startup
-        self.btn_stacked.setToolTip(_PLOT_LAYOUTS[2][2])
+        self.btn_stacked.setEnabled(False)
         self.btn_stacked.setVisible(False)
         self.btn_multistack = QPushButton('MultiStack')
         self.btn_multistack.setCheckable(True)
-        self.btn_multistack.setToolTip(_PLOT_LAYOUTS[3][2])
+        self.btn_multistack.setEnabled(False)
         self.btn_multistack.setVisible(False)
         self.btn_windows = QPushButton('多窗口')
         self.btn_windows.setCheckable(True)
-        self.btn_windows.setToolTip(_PLOT_LAYOUTS[4][2])
+        self.btn_windows.setChecked(True)
         self.btn_windows.setVisible(False)
         for legacy_button in (self.btn_multi_axis, self.btn_stacked,
                               self.btn_multistack, self.btn_windows):
             legacy_button.setParent(self)
-        self.plot_layout_menu = QToolButton()
-        self.plot_layout_menu.setAccessibleName('Plot layout')
-        self.plot_layout_menu.setPopupMode(QToolButton.ToolButtonPopupMode.InstantPopup)
-        self.plot_layout_menu.setToolTip('选择绘图布局。所有模式共用同一时间轴；多窗口还共用双游标。')
-        layout_menu = QMenu(self.plot_layout_menu)
-        self.plot_layout_menu.setMenu(layout_menu)
-        layout_group = QActionGroup(layout_menu)
-        self.plot_layout_actions = {}
-        for key, label, description in _PLOT_LAYOUTS:
-            action = layout_menu.addAction(label)
-            action.setToolTip(description)
-            action.setCheckable(True)
-            action.setData(key)
-            layout_group.addAction(action)
-            action.triggered.connect(lambda _checked=False, mode=key: self._set_plot_layout(mode))
-            self.plot_layout_actions[key] = action
-        self._sync_plot_layout_menu()
         self.btn_new_window = QPushButton('＋窗口')
-        self.btn_new_window.setEnabled(False)
+        self.btn_new_window.setEnabled(True)
         self.btn_new_window.clicked.connect(self.plot_panel.new_window)
         self.template_menu = analysis_templates.TemplateMenu(self)
         # Not a plot mode: the plotted signals as a table, in place of the plot.
@@ -534,10 +510,11 @@ class MainWindow(QMainWindow):
                                           'Clear Plot: remove every signal from the plot.\n'
                                           'Undo (Ctrl+Z) brings them back.')
         self.btn_clear_plot.setEnabled(False)  # enabled after decode
-        # The plot modes, which keep their text, then the icon buttons, and
-        # Clear Plot apart from them.
-        self.plot_layout_menu.setFixedHeight(self.btn_stacked.sizeHint().height())
-        for btn in (self.plot_layout_menu, self.btn_new_window, self.template_menu, self.btn_table):
+        # Window management and analysis controls, then the plot tools. Clear
+        # Plot stands apart from them.
+        button_height = self.btn_table.sizeHint().height()
+        for btn in (self.btn_new_window, self.template_menu, self.btn_table):
+            btn.setFixedHeight(button_height)
             self.plot_button_row.add_button(btn)
         self.plot_button_row.add_gap(18)
         for btn in (self.btn_fit, self.btn_fit_v, self.btn_zoom_rect, self.btn_cursor1,
@@ -548,7 +525,7 @@ class MainWindow(QMainWindow):
                 self.plot_button_row.add_gap(18)
                 continue
             # As tall as the text buttons; the icon alone would make it taller.
-            btn.setFixedHeight(self.plot_layout_menu.minimumHeight())
+            btn.setFixedHeight(button_height)
             self.plot_button_row.add_button(btn)
 
         self.btn_fit.clicked.connect(self.plot_panel.fit_to_window)
@@ -566,7 +543,7 @@ class MainWindow(QMainWindow):
         self.btn_hide_line.toggled.connect(self._toggle_line)
         self.btn_clear_plot.clicked.connect(self.clear_plot)
         self.plot_panel.clearRequested.connect(self.clear_plot)
-        self.plot_panel.set_stacked(self.btn_stacked.isChecked())
+        self.plot_panel.set_windows(self.btn_windows.isChecked())
         # The buttons were set before their toggled signals were connected.
         self.plot_panel.set_cursor1_enabled(self.btn_cursor1.isChecked())
         self._set_step_lines(True, announce=False)   # steps by default
@@ -1358,23 +1335,12 @@ class MainWindow(QMainWindow):
         if not keys:
             return signal_inheritance.capture(self, None)
 
-        if self.btn_windows.isChecked():
-            plot_type = 'windows'
-        elif self.btn_multistack.isChecked():
-            plot_type = 'multistack'
-        elif self.btn_stacked.isChecked():
-            plot_type = 'stacked'
-        elif self.btn_multi_axis.isChecked():
-            plot_type = 'multi_axis'
-        else:
-            plot_type = 'normal'
-
         config = {
             'type': 'canscope_temporary_plot_config',
             # v2 added 'line_style'. Readers treat it as optional, so a v1 file
             # still restores — it just carries no styles.
             'version': 2,
-            'plot_type': plot_type,
+            'plot_type': 'windows',
             'signals': [
                 {
                     'key': key,
@@ -1389,8 +1355,7 @@ class MainWindow(QMainWindow):
                 for key in keys
             ],
         }
-        if self.btn_windows.isChecked():
-            config['window_layout'] = self.plot_panel.window_layout()
+        config['window_layout'] = self.plot_panel.window_layout()
         try:
             self._temporary_plot_config_path.write_text(
                 json.dumps(config, indent=2),
@@ -1445,38 +1410,13 @@ class MainWindow(QMainWindow):
             str(signal['key']): str(signal['line_style'])
             for signal in signals if signal.get('line_style')
         })
-        plot_type = str(data.get('plot_type', 'normal'))
-        self._pending_plot_type = (
-            plot_type if plot_type in {'normal', 'multi_axis', 'stacked', 'multistack', 'windows'}
-            else 'normal'
-        )
+        self._pending_plot_type = 'windows'
 
     def _apply_pending_plot_type(self) -> None:
-        """Apply a temporary handoff's mutually-exclusive plot mode."""
-        plot_type = self._pending_plot_type
-        if plot_type is None:
+        """Apply a temporary handoff in the only product layout: windows."""
+        if self._pending_plot_type is None:
             return
-        self.btn_windows.setChecked(plot_type == 'windows')
-        if plot_type == 'windows':
-            self.btn_multi_axis.setChecked(False)
-            self.btn_stacked.setChecked(False)
-            self.btn_multistack.setChecked(False)
-        elif plot_type == 'multistack':
-            self.btn_multi_axis.setChecked(False)
-            self.btn_stacked.setChecked(False)
-            self.btn_multistack.setChecked(True)
-        elif plot_type == 'stacked':
-            self.btn_multi_axis.setChecked(False)
-            self.btn_multistack.setChecked(False)
-            self.btn_stacked.setChecked(True)
-        elif plot_type == 'multi_axis':
-            self.btn_stacked.setChecked(False)
-            self.btn_multistack.setChecked(False)
-            self.btn_multi_axis.setChecked(True)
-        else:
-            self.btn_stacked.setChecked(False)
-            self.btn_multistack.setChecked(False)
-            self.btn_multi_axis.setChecked(False)
+        self.btn_windows.setChecked(True)
         self._pending_plot_type = None
 
     def _prepare_playback(self) -> None:
@@ -1786,42 +1726,18 @@ class MainWindow(QMainWindow):
         self._update_status('多窗口' if checked else 'Plot mode updated', '选择目标窗口，双击或拖入信号；每窗可切换共轴/独立轴。')
 
     def _current_plot_layout(self) -> str:
-        """The selected mode, including the all-off 'normal' layout."""
-        if self.btn_windows.isChecked():
-            return 'windows'
-        if self.btn_multistack.isChecked():
-            return 'multistack'
-        if self.btn_stacked.isChecked():
-            return 'stacked'
-        if self.btn_multi_axis.isChecked():
-            return 'multi_axis'
-        return 'normal'
+        """The only product layout."""
+        return 'windows'
 
     def _set_plot_layout(self, mode: str) -> None:
         """Select one layout through the visible menu."""
-        buttons = {
-            'normal': None,
-            'multi_axis': self.btn_multi_axis,
-            'stacked': self.btn_stacked,
-            'multistack': self.btn_multistack,
-            'windows': self.btn_windows,
-        }
-        if mode not in buttons:
+        if mode != 'windows':
             raise ValueError(f'Unknown plot layout: {mode}')
-        if mode == 'normal':
-            for button in (self.btn_multi_axis, self.btn_stacked,
-                           self.btn_multistack, self.btn_windows):
-                button.setChecked(False)
-        else:
-            buttons[mode].setChecked(True)
+        self.btn_windows.setChecked(True)
 
     def _sync_plot_layout_menu(self) -> None:
-        """Show the actual mode, even when legacy controls set it directly."""
-        mode = self._current_plot_layout()
-        label = next(label for key, label, _description in _PLOT_LAYOUTS if key == mode)
-        for key, action in self.plot_layout_actions.items():
-            action.setChecked(key == mode)
-        self.plot_layout_menu.setText(f'布局：{label}')
+        """Compatibility hook: the visible layout menu no longer exists."""
+        return
 
     def _toggle_rect_zoom(self, checked: bool) -> None:
         self.plot_panel.set_rect_zoom(checked)
@@ -2551,10 +2467,10 @@ class MainWindow(QMainWindow):
             'plot_background_color': self.plot_panel.background_color(),
             'signal_colors': self.plot_panel.series_colors(),
             'group_colors': self.plot_panel.group_colors(),
-            'multi_axis': self.btn_multi_axis.isChecked(),
-            'stacked': self.btn_stacked.isChecked(),
-            'multistack': self.btn_multistack.isChecked(),
-            'windows': self.btn_windows.isChecked(),
+            'multi_axis': False,
+            'stacked': False,
+            'multistack': False,
+            'windows': True,
             'window_layout': self.plot_panel.window_layout(),
             'cursor1': self.btn_cursor1.isChecked(),
             'cursor2': self.btn_cursor2.isChecked(),
@@ -2757,23 +2673,9 @@ class MainWindow(QMainWindow):
         self.plot_panel.set_group_colors(dict(data.get('group_colors') or {}))
         markers = data.get('markers')
         self.plot_panel.set_markers(markers if isinstance(markers, list) else [])
-        multi_axis = bool(data.get('multi_axis', False))
-        multistack = bool(data.get('multistack', False))
         windows = bool(data.get('windows', False))
         self._pending_window_layout = data.get('window_layout', []) if windows else []
-        self.btn_windows.setChecked(False)
-        stacked = bool(data.get('stacked', not multi_axis and not multistack))
-        self.btn_multi_axis.setChecked(False)
-        self.btn_stacked.setChecked(False)
-        self.btn_multistack.setChecked(False)
-        if windows:
-            self.btn_windows.setChecked(True)
-        elif multistack:
-            self.btn_multistack.setChecked(True)
-        elif multi_axis:
-            self.btn_multi_axis.setChecked(True)
-        else:
-            self.btn_stacked.setChecked(stacked)
+        self.btn_windows.setChecked(True)
         self.btn_cursor1.setChecked(bool(data.get('cursor1', False)))
         self.btn_cursor2.setChecked(bool(data.get('cursor2', False)))
         self.plot_panel._name_show_channel = bool(data.get('name_show_channel', False))
@@ -3754,6 +3656,12 @@ class MainWindow(QMainWindow):
         if self._running_threads():
             self._closing = True
             self._calc_queue.clear()
+            # Window signal lists are embedded through QGraphicsProxyWidget,
+            # so Qt treats each list as a top-level widget even though it is
+            # rendered inside the plot. Hide them explicitly on an aborted
+            # close; findChildren(QWidget) does not cross the proxy boundary.
+            for window_list, *_ in self.plot_panel._window_widgets.values():
+                window_list.hide()
             for widget in (self, *self.findChildren(QWidget)):
                 if widget.isWindow() and widget.isVisible():
                     widget.hide()

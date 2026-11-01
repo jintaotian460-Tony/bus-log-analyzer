@@ -288,6 +288,21 @@ double-click to collapse or reopen. Collapsed panels keep their line at the edge
 Each window chooses either **全部共轴** or **每条信号独立轴** for all its signals.
 Horizontal navigation and both cursors are synchronized in both directions.
 A shared time ruler stays below the scrollable windows, including at 10 ms zoom.
+Hold the left mouse button on the bottom ruler and drag horizontally to pan
+time in every window. This also works in the other plot layouts. Panning keeps
+the zoom span, Y ranges and cursor times, and turns off **Follow view** so
+playback cannot pull the viewport back.
+
+The **线宽** menu selects 0.5, 1, 1.5, 2, 3 or 4 px for all signal curves.
+An explicit width also applies to selected signals and point mode; **自动**
+uses the original automatic widths. The choice survives log switches and is
+saved in configurations and analysis templates. On narrow windows it is
+available as a submenu under **»**.
+
+Drag a signal name from a window's local list to another window's list or
+plot to move it. Ctrl/Shift selects several signals for one move. Colors,
+line styles, visibility and original data stay with the signals; **Ctrl+Z**
+undoes the move. Dropping inside the same window keeps the existing curve.
 
 **分析模板 → 保存当前分析为模板…** saves a named view in the active engineering
 project. The first save asks for a project file if none is linked. The menu

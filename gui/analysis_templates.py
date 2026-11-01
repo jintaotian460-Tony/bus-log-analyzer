@@ -22,6 +22,7 @@ def capture(window):
     handoff = signal_inheritance.capture(window, {'signals': styles, 'plot_type': mode}) or {}
     presentation = dict(plot_type=mode, step_lines=panel.step_lines(),
                         show_data_points=window.btn_points.isChecked(),
+                        plot_line_width=panel.line_width(),
                         hide_plot_lines=window.btn_hide_line.isChecked(),
                         plot_background_color=panel.background_color(), group_colors=panel.group_colors(),
                         name_show_channel=panel._name_show_channel, name_show_message=panel._name_show_message)
@@ -72,6 +73,7 @@ def apply(window, template):
     view = template['presentation']
     window._set_step_lines(bool(view.get('step_lines', True)), announce=False)
     window.btn_points.setChecked(bool(view.get('show_data_points', True)))
+    window._set_line_width(view.get('plot_line_width'))
     window.btn_hide_line.setChecked(bool(view.get('hide_plot_lines', False)))
     panel.set_background_color(view.get('plot_background_color', '#000000'))
     panel.set_group_colors(view.get('group_colors', {}))

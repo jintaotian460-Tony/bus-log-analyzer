@@ -11,6 +11,7 @@ from PySide6.QtWidgets import (QWidget, QVBoxLayout, QHBoxLayout, QToolButton,
 
 from gui.signal_tree import SignalTreeWidget
 from gui.edge_tab import EdgeTab
+from gui.time_axis import TimePan
 
 
 MIN_WINDOW_HEIGHT = 120
@@ -22,6 +23,9 @@ class TimelineRuler(QWidget):
     def __init__(self, panel):
         super().__init__(panel._stacked_scroll.viewport())
         self.panel = panel
+        self._pan = None
+        self.setCursor(Qt.CursorShape.SizeHorCursor)
+        self.setToolTip('按住鼠标左键左右拖动刻度尺，所有窗口同步平移时间轴；滚轮缩放。')
         self.setFixedHeight(RULER_HEIGHT)
         self.hide()
 
@@ -54,6 +58,32 @@ class TimelineRuler(QWidget):
     def wheelEvent(self, event):
         self.panel._driving_vb().scaleBy(x=.8 if event.angleDelta().y() > 0 else 1.25)
         event.accept()
+
+    def mousePressEvent(self, event):
+        if event.button() == Qt.MouseButton.LeftButton:
+            view = self.panel._driving_vb()
+            self._pan = TimePan(view, event.globalPosition().x(),
+                                view.sceneBoundingRect().width(), self.panel.begin_time_pan)
+            self.setCursor(Qt.CursorShape.ClosedHandCursor)
+            event.accept()
+        else:
+            super().mousePressEvent(event)
+
+    def mouseMoveEvent(self, event):
+        if self._pan is not None and event.buttons() & Qt.MouseButton.LeftButton:
+            self._pan.move(event.globalPosition().x())
+            event.accept()
+        else:
+            super().mouseMoveEvent(event)
+
+    def mouseReleaseEvent(self, event):
+        if event.button() == Qt.MouseButton.LeftButton and self._pan is not None:
+            self._pan.move(event.globalPosition().x())
+            self._pan = None
+            self.setCursor(Qt.CursorShape.SizeHorCursor)
+            event.accept()
+        else:
+            super().mouseReleaseEvent(event)
 
 
 class HeightGrip(EdgeTab):
@@ -90,7 +120,7 @@ class WindowSignals(QTreeWidget):
         self.panel, self.window = panel, window
         self.setColumnCount(3)
         self.setHeaderLabels(['信号', 'C1', 'C2'])
-        self.setToolTip('拖入信号添加到此窗；已绘制的信号会移动到此窗。右键可调整样式或移除。')
+        self.setToolTip('按住信号名称拖到另一窗口的列表或绘图区，可移动信号；Ctrl/Shift 多选后可一起拖动。Ctrl+Z 撤销。右键调整样式。')
         self.setColumnWidth(0, 165)
         self.setColumnWidth(1, 75)
         self.setRootIsDecorated(False)
@@ -139,6 +169,8 @@ class WindowSignals(QTreeWidget):
     def startDrag(self, actions):
         mime = QMimeData()
         keys = [str(item.data(0, Qt.ItemDataRole.UserRole)) for item in self.selectedItems()]
+        if not keys:
+            return
         mime.setData(SignalTreeWidget.MIME_TYPE, '\n'.join(keys).encode('utf-8'))
         drag = QDrag(self)
         drag.setMimeData(mime)
@@ -152,10 +184,50 @@ class WindowSignals(QTreeWidget):
         self.dragEnterEvent(event)
 
     def dropEvent(self, event):
-        activate(self.panel, self.window['id'])
-        keys = bytes(event.mimeData().data(SignalTreeWidget.MIME_TYPE)).decode('utf-8').splitlines()
-        QTimer.singleShot(0, self.panel, lambda: self.panel.signalDropped.emit(keys))
-        event.acceptProposedAction()
+        if not event.mimeData().hasFormat(SignalTreeWidget.MIME_TYPE):
+            event.ignore()
+            return
+        keys = self.panel._decode_signal_mime(event.mimeData(), SignalTreeWidget.MIME_TYPE)
+        if queue_drop(self.panel, keys, self.window['id']):
+            event.acceptProposedAction()
+        else:
+            event.ignore()
+
+
+def move_signals_to_window(panel, keys, target):
+    """Move existing signal objects together, in one redraw and undo step."""
+    if not panel._windows_mode or target not in {window['id'] for window in panel._window_specs}:
+        return False
+    moving = [key for key in dict.fromkeys(keys) if key in panel._items and panel._items[key].window_id != target]
+    if not moving:
+        return False
+    panel._push_undo()
+    for key in moving:
+        panel._items[key].window_id = target
+    activate(panel, target)
+    panel.redraw()
+    return True
+
+
+def queue_drop(panel, keys, target):
+    """Finish the Qt drop before rebuilding the proxy that owns its source."""
+    keys = tuple(dict.fromkeys(key for key in keys if key))
+    if not keys or not panel._windows_mode or target not in {window['id'] for window in panel._window_specs}:
+        return False
+    revision = panel._rebuild_seq
+    def apply():
+        if panel._rebuild_seq != revision or not panel._windows_mode:
+            return
+        if target not in {window['id'] for window in panel._window_specs}:
+            return
+        existing = [key for key in keys if key in panel._items]
+        new = [key for key in keys if key not in panel._items]
+        activate(panel, target)
+        move_signals_to_window(panel, existing, target)
+        if new:
+            panel.signalDropped.emit(new)
+    QTimer.singleShot(0, panel, apply)
+    return True
 
 
 def initialise(panel):

@@ -10,8 +10,8 @@ def series(name='Temperature', times=(0, 1, 10, 11)):
                         values=np.array([20, 21, 30, 31], dtype=float), raw_values=[])
 
 
-def cell(panel, col=2):
-    return panel.table.item(panel._row_lookup['temp'], col).text()
+def cell(panel, col=2, key='temp'):
+    return panel.table.item(panel._row_lookup[key], col).text()
 
 
 def test_player_seeks_pauses_changes_speed_and_finishes(qapp):
@@ -75,6 +75,42 @@ def test_stale_readouts_gap_curves_and_layout_rebuilds(panel, qapp, mode):
     assert np.array_equal(s.values, original)
     panel.set_gap_timeout(0)
     assert not panel._gap_regions
+
+
+def test_before_first_sample_shows_when_playback_starts(panel, qapp):
+    s = series('Late signal', times=(0.773, 1.0, 1.1))
+    panel.add_series('late', s)
+    panel.set_cursor1_enabled(True)
+    panel.playback_at(0.5)
+
+    assert cell(panel, key='late') == '未开始（首个采样 0.773 s）'
+    text, detail = panel.freshness_summary(0.5)
+    assert 'NO FRESH DATA: 1/1' in text
+    assert 'Late signal: 未开始（首个采样 0.773 s）' in detail
+
+
+def test_status_bar_reports_the_total_number_of_plotted_signals(qapp, monkeypatch, tmp_path):
+    from gui.main_window import MainWindow
+
+    monkeypatch.setenv('OSVANTA_DATA_DIR', str(tmp_path))
+    window = MainWindow('Playback count test', 'test')
+    try:
+        store = SignalStore()
+        store._series_by_key['one'] = series('One')
+        store._series_by_key['two'] = series('Two', (0, 1, 2, 3))
+        window.store = store
+
+        window.add_signals_to_plot(['one'])
+        assert window.status_state_label.text() == 'State: Plotted 1 signal(s)'
+        window.add_signals_to_plot(['two'])
+        assert window.status_state_label.text() == 'State: Plotted 2 signal(s)'
+        window.add_signals_to_plot(['two'])
+        assert window.status_state_label.text() == 'State: Plotted 2 signal(s)'
+        window.clear_plot()
+        assert window.status_state_label.text() == 'State: Plotted 0 signal(s)'
+    finally:
+        window.close()
+        qapp.processEvents()
 
 
 def test_fresh_message_does_not_hide_another_signals_gap(panel):

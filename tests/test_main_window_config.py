@@ -65,12 +65,34 @@ def test_plot_toolbar_does_not_show_remove_selected_button(window):
     assert 'Remove Selected' not in button_labels
 
 
-def test_plot_toolbar_has_multistack_next_to_stacked(window):
-    layout = window.btn_stacked.parentWidget().layout()
-    stacked_index = layout.indexOf(window.btn_stacked)
+def test_plot_toolbar_uses_one_layout_menu_with_legacy_controls(window):
+    from PySide6.QtWidgets import QPushButton
 
-    assert window.btn_multistack.text() == 'MultiStack'
-    assert layout.indexOf(window.btn_multistack) == stacked_index + 1
+    visible_text_buttons = [
+        button for button in window.plot_button_row._buttons
+        if isinstance(button, QPushButton)
+    ]
+    legacy = (window.btn_multi_axis, window.btn_stacked,
+              window.btn_multistack, window.btn_windows)
+
+    assert window.plot_button_row._buttons[0] is window.plot_layout_menu
+    assert all(button.parentWidget() is window for button in legacy)
+    assert all(not button.isVisible() for button in legacy)
+    assert all(button not in visible_text_buttons for button in legacy)
+    assert window.plot_layout_menu.text() == '布局：自动堆叠'
+
+    actions = window.plot_layout_menu.menu().actions()
+    assert [action.text() for action in actions] == ['单图', '多轴', '自动堆叠', '手动堆叠', '多窗口']
+    assert actions[2].isChecked()
+    assert actions[0].actionGroup().isExclusive()
+
+    window.btn_windows.setChecked(True)
+    assert window.plot_layout_menu.text() == '布局：多窗口'
+    assert [action.text() for action in actions if action.isChecked()] == ['多窗口']
+
+    window._set_plot_layout('normal')
+    assert window.plot_layout_menu.text() == '布局：单图'
+    assert not any(button.isChecked() for button in legacy)
 
 
 def test_multistack_plot_mode_is_mutually_exclusive(window):

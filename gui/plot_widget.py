@@ -51,6 +51,7 @@ from PySide6.QtWidgets import (
 
 from core.signal_statistics import range_statistics
 from core.signal_store import SignalSeries
+from core.plot_style import normalise_line_width
 from core.playback import data_gaps, merge_gaps, sample_at
 from gui.tabular_view import TabularView
 from gui.edge_tab import _mix
@@ -939,6 +940,11 @@ class PlotPanel(QWidget):
     # "Remove all signals" in the signal table's menu: the main window clears
     # the plot, as its Clear Plot button does.
     clearRequested = Signal()
+    # The plotted key set changed by an add, remove or undo. Rebuilds that do
+    # not change membership do not emit it.
+    plotSetChanged = Signal(int)
+    # A ruler drag takes ownership of the visible time range from playback.
+    timePanStarted = Signal()
 
     # Adaptive data-point display: draw all visible samples up to this cap (per
     # curve). Above it, draw a labelled sparse subset of actual samples.
@@ -961,6 +967,7 @@ class PlotPanel(QWidget):
         self._current_key: str | None = None
         self._cursor_label_base = 'Click the plot to place Cursor 1'
         self._show_points = False
+        self._line_width = None
         self._time_minor_spacing = None
         self._hide_lines = False
         # Each value held until the next sample; off: straight lines between them.
@@ -1025,12 +1032,13 @@ class PlotPanel(QWidget):
         self._pending_click_timer.timeout.connect(self._on_pending_click_timeout)
         self._checkbox_target_keys: list[str] = []  # pre-click multi-row snapshot
         self._batch_mode: bool = False          # True while batch-adding signals; suppresses per-add rebuilds
+        self._batch_initial_keys: set[str] = set()
         self._rebuild_seq: int = 0              # bumped each rebuild and by fit_to_window(); lets deferred restores detect staleness
         self.setAcceptDrops(True)
 
         # ── Normal / multi-axis plot ──────────────────────────────────────
         _left_axis = _LeftAxis()
-        self.plot = pg.PlotWidget(axisItems={'left': _left_axis, 'bottom': TimeAxis(color=_cursor_color_on(self._background_color))}, viewBox=_ZoomViewBox(self))
+        self.plot = pg.PlotWidget(axisItems={'left': _left_axis, 'bottom': TimeAxis(color=_cursor_color_on(self._background_color), on_pan=self.begin_time_pan)}, viewBox=_ZoomViewBox(self))
         _left_axis._panel = self  # enables multi-axis drag routing in mouseDragEvent
         self.plot.showGrid(x=True, y=True, alpha=0.25)
         self.plot.setLabel('bottom', 'Time (seconds)')
@@ -1413,6 +1421,13 @@ class PlotPanel(QWidget):
             scene_pos = self.glw.mapToScene(local)
         except Exception:
             return None
+        if self._windows_mode:
+            # The left lists are proxy widgets in the same GraphicsView.
+            # A view-level drop can reach us before QTreeWidget.dropEvent.
+            for identifier, (widget, _tree, _title) in self._window_widgets.items():
+                proxy = widget.graphicsProxyWidget()
+                if proxy is not None and proxy.sceneBoundingRect().contains(scene_pos):
+                    return identifier
         for row, plot in enumerate(self._stacked_plots):
             if plot.sceneBoundingRect().contains(scene_pos):
                 if row < len(self._stacked_stack_ids):
@@ -1434,8 +1449,12 @@ class PlotPanel(QWidget):
                 event.ignore()
                 return
             target_stack = self._stacked_drop_target(event)
-            if self._windows_mode and target_stack is not None:
-                plot_windows.activate(self, target_stack)
+            if self._windows_mode:
+                if plot_windows.queue_drop(self, keys, target_stack):
+                    event.acceptProposedAction()
+                else:
+                    event.ignore()
+                return
             if self._multistack_mode and target_stack is not None:
                 self.signalDroppedToStack.emit(keys, target_stack)
             else:
@@ -1665,6 +1684,25 @@ class PlotPanel(QWidget):
         return True
 
     # ── Public setters ────────────────────────────────────────────────────
+
+    def begin_time_pan(self) -> None:
+        """A manual ruler drag must supersede deferred viewport restores."""
+        self._rebuild_seq += 1
+        self._pending_click_timer.stop()
+        self._pending_click = None
+        self.timePanStarted.emit()
+
+    def set_line_width(self, width) -> None:
+        width = normalise_line_width(width)
+        if self._line_width == width:
+            return
+        self._line_width = width
+        selected = set(self.selected_keys())
+        for key, plotted in self._items.items():
+            self._apply_curve_style(plotted, selected=key in selected, set_data=False)
+
+    def line_width(self):
+        return self._line_width
 
     def set_show_points(self, show: bool) -> None:
         """Toggle adaptive data-point display.
@@ -1984,6 +2022,7 @@ class PlotPanel(QWidget):
             # _rebuild_curves has already restored the saved view range.
             if was_empty:
                 self.fit_to_window()
+            self.plotSetChanged.emit(len(self._items))
 
     def replace_series(self, key: str, series: SignalSeries, redraw: bool = True) -> bool:
         """Replace plotted data without changing its visual or viewport state.
@@ -2064,10 +2103,12 @@ class PlotPanel(QWidget):
         self._push_undo()
         self._batch_mode = True
         self._batch_started_empty = not bool(self._items)
+        self._batch_initial_keys = set(self._items)
 
     def end_batch_add(self) -> None:
         """Finish a batch-add session. Triggers a single rebuild + fit for all queued signals."""
         self._batch_mode = False
+        changed = set(self._items) != self._batch_initial_keys
         if self._items:
             self._rebuild_curves(preserve_selection=True)
             self._update_empty_state_ui()
@@ -2075,6 +2116,8 @@ class PlotPanel(QWidget):
             # a config into an empty plot); otherwise preserve the existing view.
             if self._batch_started_empty:
                 self.fit_to_window()
+        if changed:
+            self.plotSetChanged.emit(len(self._items))
 
     # ── Internal: clear all rendered items ────────────────────────────────
 
@@ -2587,7 +2630,7 @@ class PlotPanel(QWidget):
             _left_ax = _StackedLeftAxis('left')
             p: pg.PlotItem = self.glw.addPlot(
                 row=idx, col=1 if self._windows_mode else 0,
-                axisItems={'left': _left_ax, 'bottom': TimeAxis(self._time_minor_spacing, _cursor_color_on(self._background_color))},
+                axisItems={'left': _left_ax, 'bottom': TimeAxis(self._time_minor_spacing, _cursor_color_on(self._background_color), on_pan=self.begin_time_pan)},
                 viewBox=_ZoomViewBox(self),
             )
             p.showGrid(x=True, y=True, alpha=0.25)
@@ -2779,6 +2822,11 @@ class PlotPanel(QWidget):
         plotted.curve._step_lines = self._step_lines
         if self._hide_lines:
             pen = pg.mkPen(None)
+        elif self._line_width is not None:
+            # An explicit width is exact, including selected signals and
+            # point mode. Selection remains visible in the signal list.
+            pen = pg.mkPen(color=plotted.color, width=self._line_width,
+                           style=pen_style(plotted.line_style))
         elif self._show_points:
             width = (self._SELECTED_POINTS_LINE_WIDTH if selected
                      else self._POINTS_LINE_WIDTH)
@@ -3166,6 +3214,17 @@ class PlotPanel(QWidget):
             return sample_at(timestamps, position, self._gap_timeout)
         return self._nearest_index(timestamps, position), None
 
+    @staticmethod
+    def _missing_sample_state(timestamps, position: float, age: float | None) -> str:
+        """Distinguish a signal that has not started from an empty series."""
+        if age is not None:
+            return f'Stale ({age:.1f} s)'
+        if len(timestamps):
+            first = float(timestamps[0])
+            if position < first:
+                return f'未开始（首个采样 {first:.3f} s）'
+        return 'No data'
+
     def set_gap_timeout(self, timeout: float) -> None:
         timeout = max(0.0, float(timeout))
         if self._gap_timeout == timeout:
@@ -3184,7 +3243,10 @@ class PlotPanel(QWidget):
         for plotted in signals:
             index, age = sample_at(plotted.series.timestamps, position, self._gap_timeout)
             if index is None or self._sample_missing(plotted.series, index):
-                state = 'no sample yet' if age is None else f'last update {age:.1f} s ago'
+                state = self._missing_sample_state(
+                    plotted.series.timestamps, position, age)
+                if age is not None:
+                    state = f'last update {age:.1f} s ago'
                 if index is not None:
                     state = 'Not collected / 未采集'
                 stale.append(f'{plotted.series.signal_name}: {state}')
@@ -3221,13 +3283,19 @@ class PlotPanel(QWidget):
                 if id(ts) not in seen:
                     seen.add(id(ts))
                     gaps.extend(data_gaps(ts, self._gap_timeout))
-                invalid = np.flatnonzero(~np.isfinite(np.asarray(plotted.series.values)))
-                if len(invalid):
-                    invalid = np.array([i for i in invalid if self._sample_missing(plotted.series, int(i))])
-                    if len(invalid):
-                        starts = invalid[np.r_[True, np.diff(invalid) > 1]]
-                        ends = invalid[np.r_[np.diff(invalid) > 1, True]]
-                        gaps.extend((float(ts[a]), float(ts[b+1] if b+1 < len(ts) else ts[-1])) for a,b in zip(starts,ends) if b+1 < len(ts) or ts[a] < ts[-1])
+                values = np.asarray(plotted.series.values)
+                invalid = []
+                for start in range(0, len(values), _RANGE_CHUNK):
+                    stop = min(len(values), start + _RANGE_CHUNK)
+                    missing = np.flatnonzero(~np.isfinite(values[start:stop]))
+                    invalid.extend((int(index) for index in missing))
+                invalid = [index for index in invalid
+                           if self._sample_missing(plotted.series, index)]
+                if invalid:
+                    invalid = np.asarray(invalid, dtype=np.int64)
+                    starts = invalid[np.r_[True, np.diff(invalid) > 1]]
+                    ends = invalid[np.r_[np.diff(invalid) > 1, True]]
+                    gaps.extend((float(ts[a]), float(ts[b+1] if b+1 < len(ts) else ts[-1])) for a,b in zip(starts,ends) if b+1 < len(ts) or ts[a] < ts[-1])
             for start, end in merge_gaps(gaps):
                 region = pg.LinearRegionItem((start, end), movable=False,
                                              brush=pg.mkBrush(240, 165, 35, 45),
@@ -3608,8 +3676,12 @@ class PlotPanel(QWidget):
                     continue
                 idx, age = self._readout_sample(plotted.series.timestamps, x)
                 if idx is None:
-                    cell.setText('No data' if age is None else f'Stale ({age:.1f} s)')
-                    cell.setToolTip('No fresh sample at this time; the last value is not a new measurement.')
+                    state = self._missing_sample_state(
+                        plotted.series.timestamps, x, age)
+                    cell.setText(state)
+                    cell.setToolTip(
+                        f'{state}\n'
+                        'No fresh sample at this time; the last value is not a new measurement.')
                     continue
                 if self._sample_missing(plotted.series, idx):
                     cell.setText('未采集')
@@ -4303,6 +4375,7 @@ class PlotPanel(QWidget):
         """Restore the previous plot state (up to _UNDO_DEPTH levels)."""
         if not self._undo_stack:
             return
+        before_keys = set(self._items)
         snapshot, prev_key = self._undo_stack.pop()
         self._items = snapshot
         windows = self._window_history.pop(id(snapshot), None)
@@ -4314,6 +4387,8 @@ class PlotPanel(QWidget):
         self._update_empty_state_ui()
         if self._items:
             self.fit_to_window()
+        if set(self._items) != before_keys:
+            self.plotSetChanged.emit(len(self._items))
 
     def remove_series(self, key: str) -> None:
         if key not in self._items:
@@ -4325,6 +4400,7 @@ class PlotPanel(QWidget):
         self._rebuild_curves(preserve_selection=False)
         self._set_axis_label(self._current_key)
         self._update_empty_state_ui()
+        self.plotSetChanged.emit(len(self._items))
 
     def remove_series_many(self, keys) -> None:
         """Remove multiple keys in one undo step / one rebuild. No-ops for
@@ -4342,8 +4418,10 @@ class PlotPanel(QWidget):
         self._rebuild_curves(preserve_selection=False)
         self._set_axis_label(self._current_key)
         self._update_empty_state_ui()
+        self.plotSetChanged.emit(len(self._items))
 
     def remove_selected_series(self) -> None:
+        before_keys = set(self._items)
         self._push_undo()
         for key in list(self.selected_keys()):
             self._items.pop(str(key), None)
@@ -4351,6 +4429,8 @@ class PlotPanel(QWidget):
         self._rebuild_curves(preserve_selection=False)
         self._set_axis_label(self._current_key)
         self._update_empty_state_ui()
+        if set(self._items) != before_keys:
+            self.plotSetChanged.emit(len(self._items))
 
     def clear_all(self) -> None:
         self._push_undo()

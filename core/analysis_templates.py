@@ -5,10 +5,12 @@ import math
 import os
 import re
 from pathlib import Path
+from core.plot_style import normalise_line_width
 
 KIND = 'osvanta.analysis_template'
 STYLE_FIELDS = ('color', 'visible', 'group', 'axis_visible', 'own_axis', 'multistack_id', 'line_style')
 VIEW_FIELDS = ('plot_type', 'step_lines', 'show_data_points', 'hide_plot_lines',
+               'plot_line_width',
                'plot_background_color', 'group_colors', 'name_show_channel', 'name_show_message', 'y_ranges')
 
 
@@ -66,6 +68,8 @@ def normalise_template(value):
         raise ValueError('Invalid template plot mode')
     view = {key: copy.deepcopy(presentation[key]) for key in VIEW_FIELDS if key in presentation}
     view['plot_type'] = mode
+    if view.get('plot_line_width') is not None and normalise_line_width(view['plot_line_width']) is None:
+        raise ValueError('Invalid template line width')
     for flag in ('step_lines', 'show_data_points', 'hide_plot_lines', 'name_show_channel', 'name_show_message'):
         if flag in view and not isinstance(view[flag], bool):
             raise ValueError('Invalid template display flag')

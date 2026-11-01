@@ -231,7 +231,7 @@ def test_plot_buttons_sit_above_the_plot_not_the_table(window):
     assert window.plot_button_row.parentWidget() is plot_side
     assert window.plot_panel.parentWidget() is plot_side
     assert window.plot_button_row.geometry().bottom() < window.plot_panel.geometry().top()
-    for button in (window.btn_fit, window.btn_stacked, window.btn_points):
+    for button in (window.btn_fit, window.plot_layout_menu, window.btn_points):
         assert button.parentWidget() is window.plot_button_row
 
 
@@ -241,15 +241,15 @@ def test_plot_modes_come_first_then_a_gap_then_the_icon_buttons_then_clear_plot(
     window.resize(2100, 800)
     qapp.processEvents()
     row = window.plot_button_row
-    modes = [window.btn_multi_axis, window.btn_stacked, window.btn_multistack,
-             window.btn_windows, window.btn_new_window, window.template_menu, window.btn_table]
+    modes = [window.plot_layout_menu, window.btn_new_window,
+             window.template_menu, window.btn_table]
     icons = [window.btn_fit, window.btn_fit_v, window.btn_zoom_rect, window.btn_cursor1,
              window.btn_cursor2, window.btn_line_mode]
 
     clear = window.btn_clear_plot
 
-    assert row._buttons == modes + icons + [window.btn_points, window.btn_hide_line, window.btn_time_10ms, clear]
-    assert [b.text() for b in modes] == ['Multi-Axis', 'Stacked', 'MultiStack', '多窗口', '＋窗口', '分析模板', 'Table']
+    assert row._buttons == modes + icons + [window.btn_points, window.btn_hide_line, window.btn_line_width, window.btn_time_10ms, clear]
+    assert [b.text() for b in modes] == ['布局：自动堆叠', '＋窗口', '分析模板', 'Table']
     assert [b.accessibleName() for b in icons + [window.btn_hide_line, clear]] == [
         'Fit to Window', 'Fit Vertical', 'Rectangle Zoom', 'Cursor 1', 'Cursor 2',
         'Step Mode', 'Hide Line', 'Clear Plot']
@@ -257,7 +257,7 @@ def test_plot_modes_come_first_then_a_gap_then_the_icon_buttons_then_clear_plot(
         assert button.text() == ''
         assert not button.icon().isNull()
         assert button.toolTip().startswith(button.accessibleName())
-        assert button.height() == window.btn_stacked.height()
+        assert button.height() == window.plot_layout_menu.height()
     table, fit = window.btn_table, window.btn_fit
     assert fit.x() - (table.x() + table.width()) > 2 * row.SPACING
     # Clear Plot, which empties the plot, stands apart from the view buttons.

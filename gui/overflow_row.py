@@ -114,6 +114,11 @@ class OverflowButtonRow(QWidget):
         # Rebuilt on every open so checked and enabled states are current.
         self.more_menu.clear()
         for button in self.overflowed_buttons():
+            if isinstance(button, QToolButton) and button.menu() is not None:
+                action = self.more_menu.addMenu(button.menu())
+                action.setText(button.text() or button.accessibleName())
+                action.setEnabled(button.isEnabled())
+                continue
             # An icon-only button is named by its accessible name.
             action = self.more_menu.addAction(button.text() or button.accessibleName())
             if not button.icon().isNull():

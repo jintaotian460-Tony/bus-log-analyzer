@@ -217,6 +217,8 @@ class ScenarioDriver(QObject):
                 yield from self._window_templates(record)
             elif step['op'] == 'compact_layout':
                 yield from self._compact_layout(record)
+            elif step['op'] == 'plot_controls':
+                yield from self._plot_controls(record)
             elif step['op'] == 'close_during_load':
                 yield from self._close_during_load(record)
                 return
@@ -616,7 +618,9 @@ class ScenarioDriver(QObject):
                 expected = (original >= low) & (original <= high)
                 assert np.array_equal(shown, original[expected])
                 assert np.array_equal(values, np.asarray(item.series.values)[expected])
-                assert '10.000 ms' in panel._sample_tooltip(item, 10)
+                expected_interval = (float(original[10]) - float(original[9])) * 1000
+                expected_tooltip = f'距上一原始采样点 Δt = {expected_interval:.3f} ms'
+                assert expected_tooltip in panel._sample_tooltip(item, 10)
                 counts.append(len(shown))
             assert dense_label and '全量' in panel.sampling_label.text()
             assert panel.sampling_label.isVisible() and panel.sampling_label.width() > 100
@@ -641,7 +645,9 @@ class ScenarioDriver(QObject):
                 QApplication.sendEvent(panel.glw.viewport(), event)
                 yield from self._wait(.8)
                 tip = scatter.getViewBox().toolTip()
-                record['hover_tooltip'] = '10.000 ms' in tip
+                hover_interval = (float(x[5]) - float(x[4])) * 1000
+                record['hover_tooltip'] = (
+                    f'距上一原始采样点 Δt = {hover_interval:.3f} ms' in tip)
                 record['hover_text'] = tip
                 record['hover_events'] = hovered
                 record['hover_debug'] = {'hoverable': scatter.opts['hoverable'],
@@ -918,6 +924,141 @@ class ScenarioDriver(QObject):
                       last_window_at_ruler=True, adjacent_resize=True, readable_overflow=True,
                       dock_dividers_resize=True, double_click_collapse=True,
                       collapsed_edge_reopen=True, viewport_preserved=True, screenshot=screenshot)
+
+    def _plot_controls(self, record: dict):
+        """Exercise real Qt menus and both ruler surfaces in the frozen app."""
+        from PySide6.QtCore import Qt, QPointF, QEvent
+        from PySide6.QtGui import QMouseEvent
+        from PySide6.QtTest import QTest
+        from core.plot_style import LINE_WIDTHS
+        window, panel = self._window, self._window.plot_panel
+        assert panel._items, 'Load and plot a recording before plot_controls'
+        window.resize(1700, 950)
+        yield from self._wait(.2)
+        buffers = {key: (item.curve.xData, item.curve.yData) for key, item in panel._items.items()}
+        for width in LINE_WIDTHS:
+            menu = window.btn_line_width.menu()
+            action = next(action for action in menu.actions() if action.data() == width)
+            menu.popup(window.btn_line_width.mapToGlobal(window.btn_line_width.rect().bottomLeft()))
+            yield from self._wait(.1)
+            QTest.mouseClick(menu, Qt.MouseButton.LeftButton, pos=menu.actionGeometry(action).center())
+            yield from self._wait(.1)
+            assert panel.line_width() == width
+            assert all(item.curve.opts['pen'].widthF() == width for item in panel._items.values())
+            assert all(item.curve.xData is buffers[key][0] and item.curve.yData is buffers[key][1]
+                       for key, item in panel._items.items())
+        assert window._configuration_dict()['plot_line_width'] == 4
+        record['line_widths'] = list(LINE_WIDTHS)
+        window._set_line_width(.5)
+        record['ruler_layouts'] = []
+        for mode in ('windows', 'stacked'):
+            window.btn_windows.setChecked(mode == 'windows')
+            window.btn_stacked.setChecked(mode == 'stacked')
+            panel.set_cursor1_enabled(True)
+            panel.set_cursor2_enabled(True)
+            panel.move_cursor1(12)
+            panel.move_cursor2(18)
+            panel.set_rect_zoom(True)
+            yield from self._wait(.3)
+            view = panel._driving_vb()
+            view.setXRange(10, 20, padding=0)
+            yield from self._wait(.1)
+            views = {plot.vb for plot in panel._stacked_plots}
+            views.update(vb for _, vb in panel._extra_axes)
+            before_y = {other: list(other.viewRange()[1]) for other in views}
+            width = view.sceneBoundingRect().width()
+            if mode == 'windows':
+                target = panel.window_ruler
+                start = QPointF(target.width()/2, 18)
+            else:
+                axis = panel._stacked_plots[-1].getAxis('bottom')
+                target = panel.glw.viewport()
+                start = QPointF(panel.glw.mapFromScene(axis.mapToScene(QPointF(axis.size().width()/2, 12))))
+            def send(kind, point, button, buttons):
+                global_point = QPointF(target.mapToGlobal(point.toPoint()))
+                event = QMouseEvent(kind, point, global_point, button, buttons, Qt.KeyboardModifier.NoModifier)
+                QApplication.sendEvent(target, event)
+                QApplication.processEvents()
+            window.playback.follow.setChecked(True)
+            send(QEvent.Type.MouseButtonPress, start, Qt.MouseButton.LeftButton, Qt.MouseButton.LeftButton)
+            send(QEvent.Type.MouseMove, start+QPointF(25, 3), Qt.MouseButton.NoButton, Qt.MouseButton.LeftButton)
+            send(QEvent.Type.MouseMove, start+QPointF(80, 8), Qt.MouseButton.NoButton, Qt.MouseButton.LeftButton)
+            send(QEvent.Type.MouseButtonRelease, start+QPointF(80, 8), Qt.MouseButton.LeftButton, Qt.MouseButton.NoButton)
+            yield from self._wait(.2)
+            expected = [10-80*10/width, 20-80*10/width]
+            for other in views:
+                assert max(abs(a-b) for a, b in zip(other.viewRange()[0], expected)) < .12
+                assert max(abs(a-b) for a, b in zip(other.viewRange()[1], before_y[other])) < 1e-6
+            assert panel.v_line.value() == 12 and panel.v_line2.value() == 18
+            assert not window.playback.follow.isChecked()
+            record['ruler_layouts'].append(dict(mode=mode, synchronized=True, y_unchanged=True,
+                                               cursors_unchanged=True, follow_released=True))
+        window.btn_windows.setChecked(True)
+        panel.set_rect_zoom(False)
+        panel.fit_to_window()
+        yield from self._wait(.2)
+        screenshots = {}
+        for width in (.5, 4):
+            window._set_line_width(width)
+            yield from self._wait(.2)
+            path = str(self._result_path.with_suffix(f'.width-{width:g}.png'))
+            assert window.screen().grabWindow(int(window.winId())).save(path)
+            screenshots[str(width)] = path
+        window._set_line_width(None)
+        yield from self._window_signal_drag(record)
+        record.update(outcome='passed', line_width_menu=True, exact_selected_width=True,
+                      original_buffers=True, ruler_left_drag=True, screenshots=screenshots)
+
+    def _window_signal_drag(self, record):
+        from PySide6.QtCore import Qt, QPointF, QMimeData
+        from PySide6.QtGui import QDragEnterEvent, QDropEvent
+        from gui.signal_tree import SignalTreeWidget
+        from gui import plot_windows
+        panel = self._window.plot_panel
+        keys = panel.plotted_keys()[:2]
+        target = panel._window_specs[-1]['id']
+        if any(panel._items[key].window_id == target for key in keys):
+            panel.new_window()
+            target = panel._window_specs[-1]['id']
+        yield from self._wait(.2)
+        record['window_signal_drag'] = []
+        for surface in ('plot', 'list', 'tree'):
+            original = {key: panel._items[key] for key in keys}
+            owners = {key: item.window_id for key, item in original.items()}
+            panel._driving_vb().setXRange(10, 20, padding=0)
+            yield from self._wait(.1)
+            panel.discard_undo_history()
+            mime = QMimeData()
+            mime.setData(SignalTreeWidget.MIME_TYPE, '\n'.join(keys).encode('utf-8'))
+            if surface == 'tree':
+                widget = panel._window_widgets[target][1].viewport()
+                position = QPointF(widget.rect().center())
+            else:
+                widget = panel.glw.viewport()
+                if surface == 'list':
+                    rect = panel._window_widgets[target][0].graphicsProxyWidget().sceneBoundingRect()
+                else:
+                    row = next(index for index, window in enumerate(panel._window_specs) if window['id'] == target)
+                    rect = panel._stacked_plots[row].vb.sceneBoundingRect()
+                position = QPointF(panel.glw.mapFromScene(rect.center()))
+            enter = QDragEnterEvent(position.toPoint(), Qt.DropAction.MoveAction, mime,
+                                   Qt.MouseButton.LeftButton, Qt.KeyboardModifier.NoModifier)
+            QApplication.sendEvent(widget, enter)
+            event = QDropEvent(position, Qt.DropAction.MoveAction, mime,
+                               Qt.MouseButton.LeftButton, Qt.KeyboardModifier.NoModifier)
+            QApplication.sendEvent(widget, event)
+            assert event.isAccepted()
+            # A later selection cannot redirect the queued drop to its source.
+            plot_windows.activate(panel, owners[keys[0]])
+            yield from self._wait(.2)
+            assert all(panel._items[key] is original[key] and original[key].window_id == target for key in keys)
+            assert len(panel._undo_stack) == 1
+            assert max(abs(a-b) for a, b in zip(panel._driving_vb().viewRange()[0], (10, 20))) < .05
+            panel.undo()
+            yield from self._wait(.2)
+            assert all(panel._items[key].window_id == owners[key] for key in keys)
+            record['window_signal_drag'].append(dict(surface=surface, moved_together=True,
+                                                     data_preserved=True, target_captured=True, undo=True))
 
     def _close_during_load(self, record: dict):
         window = self._window

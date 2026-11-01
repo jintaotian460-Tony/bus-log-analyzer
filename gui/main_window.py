@@ -15,7 +15,7 @@ from pathlib import Path
 from typing import TYPE_CHECKING
 
 from PySide6.QtCore import QEvent, QThread, QTimer, QUrl, Qt, Signal
-from PySide6.QtGui import QAction, QDesktopServices, QKeySequence, QShortcut
+from PySide6.QtGui import QAction, QActionGroup, QDesktopServices, QKeySequence, QShortcut
 from PySide6.QtWidgets import (
     QApplication,
     QFileDialog,
@@ -80,6 +80,7 @@ from gui.edge_tab import EdgeTab
 from gui.help_menu import HelpMenu
 from gui.user_settings import read_setting, write_setting
 from core.signal_store import SignalStore
+from core.plot_style import LINE_WIDTHS, normalise_line_width
 from gui.overflow_row import OverflowButtonRow
 from gui.plot_icons import icon_button, plot_icon
 from gui.plot_tag import PlotTag, load_plot_tag, save_plot_tag
@@ -136,6 +137,16 @@ def prescan_measurement(*args, **kwargs):
 # opens at once rather than after core.readers has finished loading; a test
 # keeps the two equal.
 _MEASUREMENT_SUFFIXES = ('.asc', '.blf', '.csv', '.mdf', '.mf4', '.trc')
+
+# The one visible plot-layout menu. The legacy checkable buttons remain for
+# saved sessions and release-test automation, but are no longer toolbar items.
+_PLOT_LAYOUTS = (
+    ('normal', '单图', 'One plot and one shared Y axis.'),
+    ('multi_axis', '多轴', 'Signals overlay in one plot; units get their own Y axes.'),
+    ('stacked', '自动堆叠', 'Signals are grouped into lanes automatically, normally by unit.'),
+    ('multistack', '手动堆叠', 'Lanes hold several signals; drag a signal into a lane to overlay it.'),
+    ('windows', '多窗口', 'Each window has its own signal list; all windows share time and cursors.'),
+)
 
 # The logo's height in the status bar: the smallest at which OSVANTA, under
 # the name, can still be read. The bar grows by a few pixels to hold it.
@@ -390,6 +401,8 @@ class MainWindow(QMainWindow):
         self.playback.positionChanged.connect(self._playback_position)
         self.playback.gapTimeoutChanged.connect(self._playback_gap_changed)
         self.plot_panel.cursor1Moved.connect(self._playback_cursor_moved)
+        self.plot_panel.timePanStarted.connect(lambda: self.playback.follow.setChecked(False))
+        self.plot_panel.plotSetChanged.connect(self._announce_plotted_count)
         self.log_box = QTextEdit()
         self.log_box.setReadOnly(True)
         self.diagnostics_box = QTextEdit()
@@ -428,16 +441,46 @@ class MainWindow(QMainWindow):
                                          'Rectangle Zoom (Z): drag a box on the plot to zoom into it,\n'
                                          'Shift+drag to zoom out, double-click to see the whole recording')
         self.btn_zoom_rect.setCheckable(True)
+        # Compatibility controls: saved sessions, release tests and keyboard
+        # automation still address these buttons. The visible toolbar exposes
+        # the mutually-exclusive modes through one menu instead of four buttons.
         self.btn_multi_axis = QPushButton('Multi-Axis')
         self.btn_multi_axis.setCheckable(True)
+        self.btn_multi_axis.setToolTip(_PLOT_LAYOUTS[1][2])
+        self.btn_multi_axis.setVisible(False)
         self.btn_stacked = QPushButton('Stacked')
         self.btn_stacked.setCheckable(True)
         self.btn_stacked.setChecked(True)  # default plot mode on app startup
+        self.btn_stacked.setToolTip(_PLOT_LAYOUTS[2][2])
+        self.btn_stacked.setVisible(False)
         self.btn_multistack = QPushButton('MultiStack')
         self.btn_multistack.setCheckable(True)
+        self.btn_multistack.setToolTip(_PLOT_LAYOUTS[3][2])
+        self.btn_multistack.setVisible(False)
         self.btn_windows = QPushButton('多窗口')
         self.btn_windows.setCheckable(True)
-        self.btn_windows.setToolTip('每窗独立信号列表，共用时间轴与双游标')
+        self.btn_windows.setToolTip(_PLOT_LAYOUTS[4][2])
+        self.btn_windows.setVisible(False)
+        for legacy_button in (self.btn_multi_axis, self.btn_stacked,
+                              self.btn_multistack, self.btn_windows):
+            legacy_button.setParent(self)
+        self.plot_layout_menu = QToolButton()
+        self.plot_layout_menu.setAccessibleName('Plot layout')
+        self.plot_layout_menu.setPopupMode(QToolButton.ToolButtonPopupMode.InstantPopup)
+        self.plot_layout_menu.setToolTip('选择绘图布局。所有模式共用同一时间轴；多窗口还共用双游标。')
+        layout_menu = QMenu(self.plot_layout_menu)
+        self.plot_layout_menu.setMenu(layout_menu)
+        layout_group = QActionGroup(layout_menu)
+        self.plot_layout_actions = {}
+        for key, label, description in _PLOT_LAYOUTS:
+            action = layout_menu.addAction(label)
+            action.setToolTip(description)
+            action.setCheckable(True)
+            action.setData(key)
+            layout_group.addAction(action)
+            action.triggered.connect(lambda _checked=False, mode=key: self._set_plot_layout(mode))
+            self.plot_layout_actions[key] = action
+        self._sync_plot_layout_menu()
         self.btn_new_window = QPushButton('＋窗口')
         self.btn_new_window.setEnabled(False)
         self.btn_new_window.clicked.connect(self.plot_panel.new_window)
@@ -463,6 +506,22 @@ class MainWindow(QMainWindow):
         self.btn_points.setAccessibleName('采样点')
         self.btn_points.setToolTip('显示原始采样点；悬停查看时间、值及相邻采样间隔。密集视图会标明稀疏显示。')
         self.btn_points.setChecked(True)
+        self.btn_line_width = QToolButton()
+        self.btn_line_width.setAccessibleName('信号线宽')
+        self.btn_line_width.setToolTip('选择所有窗口的信号线宽；自动使用原有粗细。显式选择时，选中信号也保持所选线宽。')
+        self.btn_line_width.setPopupMode(QToolButton.ToolButtonPopupMode.InstantPopup)
+        width_menu = QMenu(self.btn_line_width)
+        self.btn_line_width.setMenu(width_menu)
+        width_group = QActionGroup(width_menu)
+        self.line_width_actions = []
+        for width in (None, *LINE_WIDTHS):
+            action = width_menu.addAction('自动' if width is None else f'{width:g} px')
+            action.setCheckable(True)
+            action.setData(width)
+            width_group.addAction(action)
+            action.triggered.connect(lambda _checked=False, value=width: self._set_line_width(value))
+            self.line_width_actions.append(action)
+        self._set_line_width(None)
         self.btn_time_10ms = QPushButton('10 ms')
         self.btn_time_10ms.setAccessibleName('10 ms time ticks')
         self.btn_time_10ms.setToolTip('放大当前游标或视图中心，底部小刻度为 10 ms。仅改变视图，不重采样；Fit 恢复全程。')
@@ -477,18 +536,19 @@ class MainWindow(QMainWindow):
         self.btn_clear_plot.setEnabled(False)  # enabled after decode
         # The plot modes, which keep their text, then the icon buttons, and
         # Clear Plot apart from them.
-        for btn in (self.btn_multi_axis, self.btn_stacked, self.btn_multistack, self.btn_windows, self.btn_new_window, self.template_menu, self.btn_table):
+        self.plot_layout_menu.setFixedHeight(self.btn_stacked.sizeHint().height())
+        for btn in (self.plot_layout_menu, self.btn_new_window, self.template_menu, self.btn_table):
             self.plot_button_row.add_button(btn)
         self.plot_button_row.add_gap(18)
         for btn in (self.btn_fit, self.btn_fit_v, self.btn_zoom_rect, self.btn_cursor1,
                     self.btn_cursor2, self.btn_line_mode, self.btn_points,
-                    self.btn_hide_line, self.btn_time_10ms, None,
+                    self.btn_hide_line, self.btn_line_width, self.btn_time_10ms, None,
                     self.btn_clear_plot):
             if btn is None:
                 self.plot_button_row.add_gap(18)
                 continue
             # As tall as the text buttons; the icon alone would make it taller.
-            btn.setFixedHeight(self.btn_stacked.sizeHint().height())
+            btn.setFixedHeight(self.plot_layout_menu.minimumHeight())
             self.plot_button_row.add_button(btn)
 
         self.btn_fit.clicked.connect(self.plot_panel.fit_to_window)
@@ -1693,6 +1753,7 @@ class MainWindow(QMainWindow):
             self.btn_stacked.setChecked(False)   # mutually exclusive
             self.btn_multistack.setChecked(False)
         self.plot_panel.set_multi_axis(checked)
+        self._sync_plot_layout_menu()
         self._update_status('Plot mode updated', 'Continue plotting or fit the view')
 
     def _toggle_stacked(self, checked: bool) -> None:
@@ -1701,6 +1762,7 @@ class MainWindow(QMainWindow):
             self.btn_multi_axis.setChecked(False)  # mutually exclusive
             self.btn_multistack.setChecked(False)
         self.plot_panel.set_stacked(checked)
+        self._sync_plot_layout_menu()
         self._update_status('Plot mode updated', 'Continue plotting or fit the view')
 
     def _toggle_multistack(self, checked: bool) -> None:
@@ -1709,6 +1771,7 @@ class MainWindow(QMainWindow):
             self.btn_multi_axis.setChecked(False)
             self.btn_stacked.setChecked(False)
         self.plot_panel.set_multistack(checked)
+        self._sync_plot_layout_menu()
         self._update_status('Plot mode updated', 'Drag signals into a stack to overlay them')
 
     def _toggle_windows(self, checked: bool) -> None:
@@ -1719,7 +1782,46 @@ class MainWindow(QMainWindow):
         self.plot_panel.table_panel.setVisible(not checked)
         self.btn_new_window.setEnabled(checked)
         self.plot_panel.set_windows(checked)
+        self._sync_plot_layout_menu()
         self._update_status('多窗口' if checked else 'Plot mode updated', '选择目标窗口，双击或拖入信号；每窗可切换共轴/独立轴。')
+
+    def _current_plot_layout(self) -> str:
+        """The selected mode, including the all-off 'normal' layout."""
+        if self.btn_windows.isChecked():
+            return 'windows'
+        if self.btn_multistack.isChecked():
+            return 'multistack'
+        if self.btn_stacked.isChecked():
+            return 'stacked'
+        if self.btn_multi_axis.isChecked():
+            return 'multi_axis'
+        return 'normal'
+
+    def _set_plot_layout(self, mode: str) -> None:
+        """Select one layout through the visible menu."""
+        buttons = {
+            'normal': None,
+            'multi_axis': self.btn_multi_axis,
+            'stacked': self.btn_stacked,
+            'multistack': self.btn_multistack,
+            'windows': self.btn_windows,
+        }
+        if mode not in buttons:
+            raise ValueError(f'Unknown plot layout: {mode}')
+        if mode == 'normal':
+            for button in (self.btn_multi_axis, self.btn_stacked,
+                           self.btn_multistack, self.btn_windows):
+                button.setChecked(False)
+        else:
+            buttons[mode].setChecked(True)
+
+    def _sync_plot_layout_menu(self) -> None:
+        """Show the actual mode, even when legacy controls set it directly."""
+        mode = self._current_plot_layout()
+        label = next(label for key, label, _description in _PLOT_LAYOUTS if key == mode)
+        for key, action in self.plot_layout_actions.items():
+            action.setChecked(key == mode)
+        self.plot_layout_menu.setText(f'布局：{label}')
 
     def _toggle_rect_zoom(self, checked: bool) -> None:
         self.plot_panel.set_rect_zoom(checked)
@@ -1828,6 +1930,13 @@ class MainWindow(QMainWindow):
         if announce:
             self._update_status(f'Plot lines: {name}',
                                 'Continue plotting, fit view, or save configuration')
+
+    def _set_line_width(self, width) -> None:
+        width = normalise_line_width(width)
+        self.plot_panel.set_line_width(width)
+        for action in self.line_width_actions:
+            action.setChecked(action.data() == width)
+        self.btn_line_width.setText('线宽 自动' if width is None else f'线宽 {width:g} px')
 
     def _toggle_points(self, checked: bool) -> None:
         self.plot_panel.set_show_points(checked)
@@ -2437,6 +2546,7 @@ class MainWindow(QMainWindow):
             'generated_signals': self.calculated_signals.to_config(),
             'step_lines': self.plot_panel.step_lines(),
             'show_data_points': self.btn_points.isChecked(),
+            'plot_line_width': self.plot_panel.line_width(),
             'hide_plot_lines': self.btn_hide_line.isChecked(),
             'plot_background_color': self.plot_panel.background_color(),
             'signal_colors': self.plot_panel.series_colors(),
@@ -2637,6 +2747,7 @@ class MainWindow(QMainWindow):
         # Apply visual settings regardless of data source
         self._set_step_lines(bool(data.get('step_lines', True)), announce=False)
         self.btn_points.setChecked(bool(data.get('show_data_points', True)))
+        self._set_line_width(data.get('plot_line_width'))
         self.btn_hide_line.setChecked(
             bool(data.get('hide_plot_lines', False)) and self.btn_points.isChecked()
         )
@@ -2886,7 +2997,12 @@ class MainWindow(QMainWindow):
             self.plot_panel.fit_to_window()
 
         if plotted:
-            self._update_status(f'Plotted {plotted} signal(s)', 'Use Fit to Window, reorder, or export selected CSV')
+            self._announce_plotted_count()
+
+    def _announce_plotted_count(self, _count: int | None = None) -> None:
+        count = len(self.plot_panel.plotted_keys())
+        self._update_status(f'Plotted {count} signal(s)',
+                            'Use Fit to Window, reorder, or export selected CSV')
 
     def _add_signals_to_multistack(self, keys, target_stack: int) -> None:
         """Handle a signal-tree drop onto a specific MultiStack row."""
@@ -2978,6 +3094,7 @@ class MainWindow(QMainWindow):
     def clear_plot(self) -> None:
         self.plot_panel.clear_all()
         self._finding_plot_keys.clear()
+        self._announce_plotted_count()
 
     def plot_finding(self, finding) -> None:
         """Plot a diagnostic finding's signals and zoom to its time window."""

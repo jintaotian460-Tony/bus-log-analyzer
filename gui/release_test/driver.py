@@ -503,66 +503,108 @@ class ScenarioDriver(QObject):
             explorer.fileActivated.disconnect(request_received)
 
     def _log_file_operations(self, record: dict):
-        """Exercise the real log-tree context menu and safe ZIP operations."""
+        """Use actual context-menu events/actions, then verify newly written data."""
+        import tempfile
+        import shutil
         from PySide6.QtCore import Qt
+        from PySide6.QtGui import QContextMenuEvent
         from PySide6.QtTest import QTest
         from PySide6.QtWidgets import QApplication, QMenu
 
         window = self._window
-        root = self._result_path.with_name(self._result_path.stem + '-log-ops')
+        root = Path(tempfile.mkdtemp(prefix='log-ops-', dir=self._result_path.parent))
         package = root / 'case'
         destination = root / 'paste'
-        package.mkdir(parents=True, exist_ok=True)
-        destination.mkdir(exist_ok=True)
-        source = package / 'Recorder.csv'
+        package.mkdir()
+        destination.mkdir()
+        source = root / 'Recorder.csv'
         source.write_text('Timestamps [s],X\n0,10\n', encoding='utf-8')
+        shutil.copy2(source, package / source.name)
         notes = package / 'notes'
         notes.mkdir()
         (notes / 'note.txt').write_text('keep me', encoding='utf-8')
 
         explorer = window.log_explorer
         window.left_dock.show()
+        window.signal_dock.hide()
         explorer.set_root(str(root))
         tree = explorer.tree
-        yield from self._wait(0.2)
-        menu = explorer._context_menu(source)
-        menu.popup(tree.viewport().mapToGlobal(tree.viewport().rect().center()))
-        yield from self._wait(0.2)
-        labels = [action.text() for action in menu.actions()] if isinstance(menu, QMenu) else []
-        record['context_menu'] = isinstance(menu, QMenu)
+
+        def context(path):
+            deadline = time.monotonic() + 10
+            index = explorer.model.index(str(path))
+            while True:
+                tree.scrollTo(index)
+                if index.isValid() and not tree.visualRect(index).isEmpty():
+                    break
+                if time.monotonic() > deadline:
+                    raise RuntimeError(f'No visible log row: {path.name}')
+                yield
+                index = explorer.model.index(str(path))
+            tree.setCurrentIndex(index)
+            point = tree.visualRect(index).center()
+            event = QContextMenuEvent(QContextMenuEvent.Reason.Mouse, point,
+                                      tree.viewport().mapToGlobal(point))
+            QApplication.sendEvent(tree.viewport(), event)
+            yield from self._wait(.1)
+            menu = QApplication.activePopupWidget()
+            assert isinstance(menu, QMenu), 'Log row did not open a context menu'
+            return menu
+
+        def click(menu, label):
+            action = next(action for action in menu.actions() if action.text() == label)
+            assert action.isEnabled(), label
+            QTest.mouseClick(menu, Qt.MouseButton.LeftButton,
+                             pos=menu.actionGeometry(action).center())
+
+        def finished():
+            deadline = time.monotonic() + 10
+            while explorer._file_job is not None:
+                if time.monotonic() > deadline:
+                    raise RuntimeError('File operation timed out')
+                yield
+            assert not explorer._last_file_result.errors, explorer._last_file_result.errors
+            return explorer._last_file_result.paths
+
+        menu = yield from context(source)
+        labels = [action.text() for action in menu.actions()]
+        record['context_menu'] = True
+        record['context_event_on_file_row'] = True
         record['menu_items'] = labels
         record['required_items'] = all(
             label in labels for label in ('打开所在文件夹', '复制路径', '复制', '压缩为 ZIP', '粘贴到此处'))
-        if isinstance(menu, QMenu):
-            menu.grab().save(str(self._result_path.with_suffix('.log-menu.png')))
-            menu.close()
-
-        explorer._copy_files([source])
-        explorer._paste_files(destination)
+        menu.grab().save(str(self._result_path.with_suffix('.log-menu.png')))
+        window.screen().grabWindow(int(window.winId())).save(str(self._result_path.with_suffix('.log-explorer.png')))
+        click(menu, '复制路径')
+        record['path_clipboard'] = QApplication.clipboard().text() == str(source)
+        menu = yield from context(source)
+        click(menu, '复制')
+        menu = yield from context(destination)
+        click(menu, '粘贴到此处')
+        yield from finished()
         copied = destination / source.name
-        explorer._compress_to_zip([package])
+        record['copied'] = copied.read_bytes() == source.read_bytes()
+        menu = yield from context(package)
+        click(menu, '压缩为 ZIP')
+        yield from finished()
         archive = root / 'case.zip'
-        explorer._extract_zip(archive)
-        extracted = root / 'case'
-
-        zip_menu = explorer._context_menu(archive)
+        record['zipped'] = archive.is_file()
+        record['zip_visible_without_filter_change'] = '*.zip' in explorer.model.nameFilters()
+        zip_menu = yield from context(archive)
         zip_labels = [action.text() for action in zip_menu.actions()]
         record['extract_menu_item'] = '解压 ZIP' in zip_labels
-        zip_menu.popup(tree.viewport().mapToGlobal(tree.viewport().rect().center()))
-        yield from self._wait(0.2)
         zip_menu.grab().save(str(self._result_path.with_suffix('.log-extract-menu.png')))
-        zip_menu.close()
-
-        record['copied'] = copied.is_file() and copied.read_text(encoding='utf-8').startswith('Timestamps')
-        record['zipped'] = archive.is_file()
+        click(zip_menu, '解压 ZIP')
+        extracted_paths = yield from finished()
+        assert len(extracted_paths) == 1 and extracted_paths[0] != package
+        extracted = extracted_paths[0] / package.name
         record['extracted'] = (
-            (extracted / 'Recorder.csv').is_file()
+            (extracted / 'Recorder.csv').read_bytes() == source.read_bytes()
             and (extracted / 'notes' / 'note.txt').read_text(encoding='utf-8') == 'keep me')
-        record['path_clipboard'] = QApplication.clipboard().text() == ''
-        explorer._copy_paths_to_clipboard([source])
-        record['path_clipboard'] = QApplication.clipboard().text() == str(source)
+        record['extracted_destination'] = str(extracted_paths[0])
+        record['source_untouched'] = (package / 'Recorder.csv').read_bytes() == source.read_bytes()
+        record['actions_clicked'] = True
         QApplication.clipboard().clear()
-        explorer.set_root('')
         record['outcome'] = (
             'passed' if all((record['context_menu'], record['required_items'],
                              record.get('extract_menu_item'), record['copied'],

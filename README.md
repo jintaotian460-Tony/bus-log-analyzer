@@ -84,6 +84,14 @@ This feature replays measurements on screen; it does not transmit on a CAN bus.
 
 ### Projects and additional CSV signals
 
+In **Log Explorer**, right-click a file or folder to open its location, copy
+its path, copy/paste files or folders, or compress/extract ZIP archives. ZIP
+files are visible alongside measurement files. Ctrl+C / Ctrl+V and multiple
+selection are supported; Explorer's file clipboard works in both directions.
+File operations run in the background and can be cancelled. Existing items
+are kept: duplicate names get a numeric suffix. Extraction creates a separate
+folder and rejects paths outside it. RAR and 7z extraction are not supported.
+
 **File → Project settings** names a project, sets its clock and freshness defaults,
 and adds CSV signal sources. Each CSV source selects its timestamp column and
 physical signal columns, its encoding and delimiter, and a time alignment rule.

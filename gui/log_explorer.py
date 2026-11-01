@@ -1,14 +1,39 @@
 """Filesystem-backed log explorer; one active measurement at a time."""
-import shutil
-import zipfile
 from pathlib import Path
+import time
 
-from PySide6.QtCore import Qt, Signal, QDir, QMimeData, QProcess, QUrl
+from PySide6.QtCore import Qt, Signal, QDir, QMimeData, QProcess, QThread, QUrl
 from PySide6.QtGui import QShortcut, QKeySequence, QDesktopServices
 from PySide6.QtWidgets import (
-    QApplication, QFileDialog, QFileSystemModel, QHBoxLayout, QLabel,
-    QLineEdit, QMenu, QMessageBox, QPushButton, QTreeView, QVBoxLayout, QWidget,
+    QAbstractItemView, QApplication, QFileDialog, QFileSystemModel, QHBoxLayout,
+    QLabel, QLineEdit, QMenu, QMessageBox, QPushButton, QTreeView, QVBoxLayout, QWidget,
 )
+
+from core import log_file_operations as file_ops
+
+
+class _FileJob(QThread):
+    progressed = Signal(str)
+
+    def __init__(self, operation, args, parent):
+        super().__init__(parent)
+        self.operation, self.args = operation, args
+        self.result = file_ops.Result()
+        self._last_progress = 0.0
+
+    def _progress(self, name):
+        if self.isInterruptionRequested():
+            raise file_ops.Cancelled
+        now = time.monotonic()
+        if now - self._last_progress >= 0.1:
+            self._last_progress = now
+            self.progressed.emit(name)
+
+    def run(self):
+        try:
+            self.result = self.operation(*self.args, progress=self._progress)
+        except Exception as exc:
+            self.result = file_ops.Result(errors=[str(exc)])
 
 
 class LogExplorer(QWidget):
@@ -21,16 +46,20 @@ class LogExplorer(QWidget):
     def __init__(self, parent=None):
         super().__init__(parent)
         self.root_path = ''
-        self._copied_paths = []
+        self._file_job = None
+        self._last_file_result = file_ops.Result()
         self.model = QFileSystemModel(self)
         self.model.setReadOnly(True)
         self.model.setFilter(QDir.Filter.AllDirs | QDir.Filter.Files | QDir.Filter.NoDotAndDotDot)
         self.model.setNameFilterDisables(False)
-        self.model.setNameFilters(['*' + suffix for suffix in self.SUFFIXES])
+        self._filter('')
         self.tree = QTreeView()
         self.tree.setModel(self.model)
         self.tree.setHeaderHidden(True)
         self.tree.setTextElideMode(Qt.TextElideMode.ElideMiddle)
+        self.tree.setSelectionMode(QAbstractItemView.SelectionMode.ExtendedSelection)
+        self.tree.setSelectionBehavior(QAbstractItemView.SelectionBehavior.SelectRows)
+        self.tree.setToolTip('右键：打开文件夹、复制、粘贴、压缩 / 解压 ZIP；支持 Ctrl+C / Ctrl+V')
         for column in range(1, 4):
             self.tree.hideColumn(column)
         self.tree.setSortingEnabled(True)
@@ -42,6 +71,11 @@ class LogExplorer(QWidget):
             shortcut = QShortcut(QKeySequence(key), self.tree)
             shortcut.setContext(Qt.ShortcutContext.WidgetShortcut)
             shortcut.activated.connect(lambda: self._activate(self.tree.currentIndex()))
+        for sequence, action in ((QKeySequence.StandardKey.Copy, self._copy_selection),
+                                 (QKeySequence.StandardKey.Paste, self._paste_selection)):
+            shortcut = QShortcut(QKeySequence(sequence), self.tree)
+            shortcut.setContext(Qt.ShortcutContext.WidgetWithChildrenShortcut)
+            shortcut.activated.connect(action)
         self.tree.setVisible(False)
         folder = QPushButton('Open folder…')
         folder.clicked.connect(self.choose_root)
@@ -59,6 +93,14 @@ class LogExplorer(QWidget):
         layout.addWidget(self.label)
         layout.addWidget(self.search)
         layout.addWidget(self.tree, 1)
+        self.operation_status = QLabel()
+        self.operation_status.setWordWrap(True)
+        self.cancel_operation = QPushButton('取消')
+        self.cancel_operation.clicked.connect(self.cancel_file_operation)
+        self.operation_status.hide()
+        self.cancel_operation.hide()
+        layout.addWidget(self.operation_status)
+        layout.addWidget(self.cancel_operation)
 
     def set_root(self, path):
         path = str(Path(path).resolve()) if path else ''
@@ -98,15 +140,24 @@ class LogExplorer(QWidget):
                 self.tree.scrollTo(index)
 
     def _selected_paths(self):
-        return [
-            Path(self.model.filePath(index))
-            for index in self.tree.selectionModel().selectedRows(0)
-            if index.isValid()
-        ]
+        return [Path(self.model.filePath(index))
+                for index in self.tree.selectionModel().selectedRows(0) if index.isValid()]
+
+    def _copy_selection(self):
+        self._copy_files(self._selected_paths())
+
+    def _paste_selection(self):
+        index = self.tree.currentIndex()
+        path = Path(self.model.filePath(index)) if index.isValid() else None
+        if path is None:
+            path = Path(self.root_path) if self.root_path else None
+        if path is not None:
+            self._paste_files(path if path.is_dir() else path.parent)
 
     def _path_at(self, position):
         index = self.tree.indexAt(position)
         if not index.isValid():
+            self.tree.clearSelection()
             return Path(self.root_path) if self.root_path else None
         if not self.tree.selectionModel().isSelected(index):
             self.tree.setCurrentIndex(index)
@@ -114,165 +165,118 @@ class LogExplorer(QWidget):
 
     def _show_context_menu(self, position):
         path = self._path_at(position)
-        if path is None:
-            return
-        menu = self._context_menu(path)
-        menu.exec(self.tree.viewport().mapToGlobal(position))
+        if path is not None:
+            menu = self._context_menu(path)
+            menu.aboutToHide.connect(menu.deleteLater)
+            menu.popup(self.tree.viewport().mapToGlobal(position))
 
     def _context_menu(self, path):
         path = Path(path)
         selected = self._selected_paths()
+        selected = selected if path in selected else [path]
         target = path if path.is_dir() else path.parent
+        busy = self._file_job is not None
         menu = QMenu(self)
         open_action = menu.addAction('打开所在文件夹' if path.is_file() else '打开文件夹')
         open_action.triggered.connect(lambda: self._open_in_explorer(path))
-
-        if selected:
-            copy_path_action = menu.addAction('复制路径')
-            copy_path_action.triggered.connect(lambda: self._copy_paths_to_clipboard(selected))
-            copy_action = menu.addAction('复制')
-            copy_action.triggered.connect(lambda: self._copy_files(selected))
-            compress_action = menu.addAction('压缩为 ZIP')
-            compress_action.triggered.connect(lambda: self._compress_to_zip(selected))
-
+        copy_path_action = menu.addAction('复制路径')
+        copy_path_action.triggered.connect(lambda: self._copy_paths_to_clipboard(selected))
+        copy_action = menu.addAction('复制')
+        copy_action.setShortcut(QKeySequence.StandardKey.Copy)
+        copy_action.triggered.connect(lambda: self._copy_files(selected))
         paste_action = menu.addAction('粘贴到此处')
-        paste_action.setEnabled(bool(self._clipboard_paths()))
+        paste_action.setShortcut(QKeySequence.StandardKey.Paste)
+        paste_action.setEnabled(not busy and bool(self._clipboard_paths()))
         paste_action.triggered.connect(lambda: self._paste_files(target))
-
+        menu.addSeparator()
+        compress_action = menu.addAction('压缩为 ZIP')
+        compress_action.setEnabled(not busy)
+        compress_action.triggered.connect(lambda: self._compress_to_zip(selected))
         if path.is_file() and path.suffix.lower() in self.ARCHIVE_SUFFIXES:
-            menu.addSeparator()
             extract_action = menu.addAction('解压 ZIP')
+            extract_action.setEnabled(not busy)
             extract_action.triggered.connect(lambda: self._extract_zip(path))
-
         return menu
 
     def _open_in_explorer(self, path):
         path = Path(path)
         if path.is_dir():
-            QDesktopServices.openUrl(QUrl.fromLocalFile(str(path)))
-            return
-        if QProcess.startDetached('explorer.exe', ['/select,', str(path)]):
-            return
-        QDesktopServices.openUrl(QUrl.fromLocalFile(str(path.parent)))
+            return QDesktopServices.openUrl(QUrl.fromLocalFile(str(path)))
+        result = QProcess.startDetached('explorer.exe', ['/select,', str(path)])
+        started = result[0] if isinstance(result, tuple) else result
+        if not started:
+            return QDesktopServices.openUrl(QUrl.fromLocalFile(str(path.parent)))
+        return True
 
     def _copy_paths_to_clipboard(self, paths):
-        self._copied_paths = []
-        QApplication.clipboard().setText('\r\n'.join(str(path) for path in paths))
-        self.operationCompleted.emit(f'Copied {len(paths)} path(s) to the clipboard')
+        value = '\r\n'.join(str(path) for path in paths)
+        QApplication.clipboard().setText(value)
+        if QApplication.clipboard().text() != value:
+            QMessageBox.warning(self, '复制失败', 'Windows 剪贴板暂不可用，请稍后重试。')
+            return
+        self.operationCompleted.emit(f'已复制 {len(paths)} 个路径')
 
     def _copy_files(self, paths):
-        paths = [path for path in paths if path.exists()]
+        paths = [Path(path) for path in paths if Path(path).exists()]
         if not paths:
             return
         mime = QMimeData()
         mime.setUrls([QUrl.fromLocalFile(str(path)) for path in paths])
+        mime.setData('Preferred DropEffect', b'\x01\x00\x00\x00')
         QApplication.clipboard().setMimeData(mime)
-        self._copied_paths = [str(path) for path in paths]
-        self.operationCompleted.emit(f'Copied {len(paths)} item(s)')
+        if self._clipboard_paths() != paths:
+            QMessageBox.warning(self, '复制失败', 'Windows 剪贴板暂不可用，请稍后重试。')
+            return
+        self.operationCompleted.emit(f'已复制 {len(paths)} 个文件或文件夹')
 
     def _clipboard_paths(self):
-        if self._copied_paths:
-            return [Path(path) for path in self._copied_paths if Path(path).exists()]
-
         mime = QApplication.clipboard().mimeData()
         urls = mime.urls() if mime is not None else []
-        paths = [Path(url.toLocalFile()) for url in urls if url.isLocalFile()]
-        return [path for path in paths if path.exists()]
+        return [Path(url.toLocalFile()) for url in urls
+                if url.isLocalFile() and Path(url.toLocalFile()).exists()]
 
     def _paste_files(self, target):
-        target = Path(target)
-        if not target.is_dir():
-            return
-        created, errors = [], []
-        for source in self._clipboard_paths():
-            source = source.resolve()
-            try:
-                if source == target.resolve() or target.resolve() in source.parents:
-                    raise OSError(f'Cannot paste {source.name} into itself')
-                destination = self._unique_path(target / source.name)
-                if source.is_file():
-                    shutil.copy2(source, destination)
-                else:
-                    shutil.copytree(source, destination)
-                created.append(destination)
-            except OSError as exc:
-                errors.append(f'{source.name}: {exc}')
-        self._report_file_operation('Pasted', created, errors)
+        paths = self._clipboard_paths()
+        if paths and Path(target).is_dir():
+            self._start_file_operation('粘贴', file_ops.paste, paths, Path(target))
 
     def _compress_to_zip(self, paths):
-        paths = [path for path in paths if path.exists()]
-        if not paths:
+        self._start_file_operation('压缩', file_ops.compress, [Path(path) for path in paths])
+
+    def _extract_zip(self, path):
+        self._start_file_operation('解压', file_ops.extract, Path(path))
+
+    def _start_file_operation(self, verb, operation, *args):
+        if self._file_job is not None:
             return
-        stem = paths[0].name if len(paths) == 1 else paths[0].parent.name
-        errors = []
-        try:
-            destination = self._unique_path(paths[0].parent / f'{stem}.zip')
-            with zipfile.ZipFile(destination, 'w', zipfile.ZIP_DEFLATED) as archive:
-                for path in paths:
-                    self._write_zip_entry(archive, path)
-        except OSError as exc:
-            errors.append(f'{stem}: {exc}')
-            destination = locals().get('destination')
-            if destination is not None and destination.exists():
-                destination.unlink()
-            destination = None
-        if destination is not None:
-            self._report_file_operation('Zipped', [destination], errors)
-        else:
-            self._report_file_operation('Zipped', [], errors)
+        self._operation_verb = verb
+        self.operation_status.setText(f'正在{verb}…')
+        self.operation_status.show()
+        self.cancel_operation.show()
+        job = self._file_job = _FileJob(operation, args, self)
+        job.progressed.connect(lambda name: self.operation_status.setText(f'正在{verb}：{name}'))
+        job.finished.connect(self._finish_file_operation)
+        job.start()
 
-    def _write_zip_entry(self, archive, path):
-        path = Path(path)
-        if path.is_file():
-            archive.write(path, path.name)
-            return
-        for child in path.rglob('*'):
-            archive.write(child, child.relative_to(path.parent))
+    def cancel_file_operation(self):
+        if self._file_job is not None:
+            self._file_job.requestInterruption()
 
-    def _extract_zip(self, archive_path):
-        archive_path = Path(archive_path)
-        errors = []
-        try:
-            destination = self._unique_path(archive_path.parent / archive_path.stem)
-            with zipfile.ZipFile(archive_path) as archive:
-                root = destination.resolve()
-                for member in archive.infolist():
-                    target = (destination / member.filename).resolve()
-                    if root != target and root not in target.parents:
-                        raise OSError(f'unsafe entry: {member.filename}')
-                    if member.is_dir():
-                        target.mkdir(parents=True, exist_ok=True)
-                    else:
-                        target.parent.mkdir(parents=True, exist_ok=True)
-                        with archive.open(member) as source, target.open('wb') as output:
-                            shutil.copyfileobj(source, output)
-        except (OSError, zipfile.BadZipFile) as exc:
-            errors.append(f'{archive_path.name}: {exc}')
-            destination = locals().get('destination')
-            if destination is not None and destination.exists():
-                shutil.rmtree(destination)
-            destination = None
-        if destination is not None:
-            self._report_file_operation('Extracted', [destination], errors)
-        else:
-            self._report_file_operation('Extracted', [], errors)
-
-    @staticmethod
-    def _unique_path(path):
-        if not path.exists():
-            return path
-        stem, suffix = path.stem, path.suffix
-        for number in range(1, 10000):
-            candidate = path.with_name(f'{stem} ({number}){suffix}')
-            if not candidate.exists():
-                return candidate
-        raise OSError(f'Could not find a free name for {path.name}')
-
-    def _report_file_operation(self, verb, paths, errors):
-        if paths:
-            self.select_file(str(paths[-1]))
-        message = f'{verb} {len(paths)} item(s)' if paths else f'{verb} failed'
-        if errors:
-            message += '\n' + '\n'.join(errors)
-            QMessageBox.warning(self, 'File operation', message)
+    def _finish_file_operation(self):
+        job = self._file_job
+        result = self._last_file_result = job.result
+        self._file_job = None
+        job.deleteLater()
+        self.operation_status.hide()
+        self.cancel_operation.hide()
+        message = f'{self._operation_verb}完成：{len(result.paths)} 项'
+        if result.cancelled:
+            message = f'{self._operation_verb}已取消，已完成 {len(result.paths)} 项'
+        if result.errors:
+            message += '\n' + '\n'.join(result.errors)
+        if not getattr(self.window(), '_closing', False):
+            if result.paths:
+                self.select_file(str(result.paths[-1]))
+            if result.errors:
+                QMessageBox.warning(self, '文件操作失败', message)
         self.operationCompleted.emit(message.replace('\n', '; '))

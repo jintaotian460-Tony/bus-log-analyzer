@@ -108,6 +108,17 @@ def _stop_file_system_watch(explorer):
     explorer.model.setRootPath('')
 
 
+def _wait_file_job(qapp, explorer):
+    import time
+    from PySide6.QtTest import QTest
+    deadline = time.monotonic() + 10
+    while explorer._file_job is not None:
+        assert time.monotonic() < deadline
+        qapp.processEvents()
+        QTest.qWait(10)
+    return explorer._last_file_result
+
+
 def test_log_tree_context_menu_entries(qapp, tmp_path, monkeypatch):
     import time
     from PySide6.QtCore import Qt
@@ -173,14 +184,18 @@ def test_log_tree_basic_file_operations(qapp, tmp_path, monkeypatch):
     try:
         explorer._copy_files([source])
         explorer._paste_files(paste_target)
+        _wait_file_job(qapp, explorer)
         copied = paste_target / source.name
         assert copied.read_text(encoding='utf-8').startswith('Timestamps')
 
         explorer._compress_to_zip([package])
+        _wait_file_job(qapp, explorer)
         archive = root / 'case.zip'
         assert archive.is_file()
         explorer._extract_zip(archive)
-        extracted = root / 'case'
+        assert not _wait_file_job(qapp, explorer).errors
+        extracted = root / 'case (1)' / 'case'
+        assert extracted != package
         assert (extracted / 'Recorder.csv').read_text(encoding='utf-8').startswith('Timestamps')
         assert (extracted / 'notes' / 'note.txt').read_text(encoding='utf-8') == 'keep me'
 
@@ -222,15 +237,18 @@ def test_log_tree_file_operations_never_overwrite_and_reject_zip_escape(
     try:
         explorer._copy_files([source])
         explorer._paste_files(paste)
+        _wait_file_job(qapp, explorer)
         assert existing_copy.read_text(encoding='utf-8') == 'existing copy'
         assert (paste / 'Recorder (1).csv').read_text(encoding='utf-8') == 'new recording'
 
         explorer._compress_to_zip([package])
+        _wait_file_job(qapp, explorer)
         assert existing_archive.read_text(encoding='utf-8') == 'existing archive'
         safe_archive = root / 'case (1).zip'
         assert safe_archive.is_file()
 
         explorer._extract_zip(safe_archive)
+        _wait_file_job(qapp, explorer)
         assert (existing_extract / 'keep.txt').read_text(encoding='utf-8') == 'existing folder'
         extracted = root / 'case (1) (1)'
         assert (extracted / 'case' / 'Recorder.csv').read_text(encoding='utf-8') == 'new recording'
@@ -239,6 +257,7 @@ def test_log_tree_file_operations_never_overwrite_and_reject_zip_escape(
         with zipfile.ZipFile(unsafe_archive, 'w') as archive:
             archive.writestr('../escaped.txt', 'must not escape')
         explorer._extract_zip(unsafe_archive)
+        _wait_file_job(qapp, explorer)
         assert not (root.parent / 'escaped.txt').exists()
         assert not (root / 'unsafe').exists()
         assert warning.call_count == 1
@@ -281,5 +300,154 @@ def test_signal_titlebar_controls_minimise_restore_maximise_and_hide(qapp, monke
         window._act_signals.trigger()
         assert panel.isVisible()
     finally:
+        window.close()
+        qapp.processEvents()
+
+
+def test_zip_is_visible_on_open_and_clipboard_tracks_external_changes(qapp, tmp_path):
+    from PySide6.QtCore import QMimeData, QUrl
+    from PySide6.QtWidgets import QApplication
+    from PySide6.QtTest import QTest
+    from gui.log_explorer import LogExplorer
+
+    first = tmp_path / 'a.csv'
+    second = tmp_path / 'b.csv'
+    first.write_text('one')
+    second.write_text('two')
+    archive = tmp_path / 'case.zip'
+    archive.write_bytes(b'ZIP')
+    explorer = LogExplorer()
+    try:
+        explorer.set_root(str(tmp_path))
+        assert '*.zip' in explorer.model.nameFilters()
+        explorer._copy_files([first])
+        assert explorer._clipboard_paths() == [first]
+        external = QMimeData()
+        external.setUrls([QUrl.fromLocalFile(str(second))])
+        QApplication.clipboard().setMimeData(external)
+        QTest.qWait(20)
+        assert explorer._clipboard_paths() == [second]
+        QApplication.clipboard().setText('plain text')
+        assert not explorer._clipboard_paths()
+    finally:
+        QApplication.clipboard().clear()
+        _stop_file_system_watch(explorer)
+        explorer.close()
+        qapp.processEvents()
+
+
+def test_file_job_runs_off_gui_thread_and_can_be_cancelled(qapp, tmp_path):
+    import threading
+    from PySide6.QtCore import QTimer, Qt
+    from PySide6.QtTest import QTest
+    from gui.log_explorer import LogExplorer
+    from core import log_file_operations as ops
+
+    explorer = LogExplorer()
+    started, release = threading.Event(), threading.Event()
+    gui_id = threading.get_ident()
+    worker_ids, ticks = [], []
+    def slow_operation(progress):
+        worker_ids.append(threading.get_ident())
+        started.set()
+        release.wait(3)
+        try:
+            progress('test')
+        except ops.Cancelled:
+            return ops.Result(cancelled=True)
+        return ops.Result()
+    try:
+        explorer._start_file_operation('复制', slow_operation)
+        assert started.wait(3)
+        QTimer.singleShot(0, lambda: ticks.append(True))
+        qapp.processEvents()
+        assert ticks and worker_ids == [worker_ids[0]] and worker_ids[0] != gui_id
+        QTest.mouseClick(explorer.cancel_operation, Qt.MouseButton.LeftButton)
+        release.set()
+        result = _wait_file_job(qapp, explorer)
+        assert result.cancelled
+    finally:
+        release.set()
+        _wait_file_job(qapp, explorer)
+        explorer.close()
+        qapp.processEvents()
+
+
+def test_tree_copy_paste_shortcuts_and_explorer_launch(qapp, tmp_path, monkeypatch):
+    import time
+    from PySide6.QtCore import Qt
+    from PySide6.QtTest import QTest
+    from PySide6.QtWidgets import QApplication
+    from gui.log_explorer import LogExplorer, QDesktopServices, QProcess
+
+    source = tmp_path / '记录.csv'
+    source.write_text('original samples')
+    explorer = LogExplorer()
+    explorer.resize(500, 500)
+    try:
+        explorer.set_root(str(tmp_path))
+        explorer.show()
+        index = explorer.model.index(str(source))
+        deadline = time.monotonic() + 5
+        while not index.isValid() or explorer.tree.visualRect(index).isEmpty():
+            assert time.monotonic() < deadline
+            qapp.processEvents()
+            QTest.qWait(20)
+            index = explorer.model.index(str(source))
+        explorer.tree.setCurrentIndex(index)
+        explorer.activateWindow()
+        explorer.tree.setFocus()
+        qapp.processEvents()
+        QTest.keyClick(explorer.tree, Qt.Key.Key_C, Qt.KeyboardModifier.ControlModifier)
+        assert explorer._clipboard_paths() == [source]
+        QTest.keyClick(explorer.tree, Qt.Key.Key_V, Qt.KeyboardModifier.ControlModifier)
+        assert not _wait_file_job(qapp, explorer).errors
+        assert (tmp_path / '记录 (1).csv').read_text() == 'original samples'
+
+        launch = Mock(return_value=(True, 123))
+        opened = Mock(return_value=True)
+        monkeypatch.setattr(QProcess, 'startDetached', launch)
+        monkeypatch.setattr(QDesktopServices, 'openUrl', opened)
+        explorer._open_in_explorer(source)
+        launch.assert_called_once_with('explorer.exe', ['/select,', str(source)])
+        assert not opened.called
+        launch.return_value = (False, 0)
+        explorer._open_in_explorer(source)
+        assert Path(opened.call_args.args[0].toLocalFile()) == tmp_path
+        explorer._open_in_explorer(tmp_path)
+        assert Path(opened.call_args.args[0].toLocalFile()) == tmp_path
+    finally:
+        QApplication.clipboard().clear()
+        _stop_file_system_watch(explorer)
+        explorer.close()
+        qapp.processEvents()
+
+
+def test_main_window_close_cancels_file_job_without_destroying_running_thread(qapp):
+    import threading
+    from gui.main_window import MainWindow
+    from core import log_file_operations as ops
+
+    release, started = threading.Event(), threading.Event()
+    def slow_operation(progress):
+        started.set()
+        release.wait(3)
+        try:
+            progress('test')
+        except ops.Cancelled:
+            return ops.Result(cancelled=True)
+        return ops.Result()
+    window = MainWindow('Close during file operation', 'test')
+    try:
+        window.show()
+        window.log_explorer._start_file_operation('复制', slow_operation)
+        assert started.wait(3)
+        window.close()
+        assert window._closing and not window.isVisible()
+        release.set()
+        assert _wait_file_job(qapp, window.log_explorer).cancelled
+    finally:
+        release.set()
+        _wait_file_job(qapp, window.log_explorer)
         window.close()
         qapp.processEvents()

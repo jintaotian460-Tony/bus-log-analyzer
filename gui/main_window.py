@@ -3648,6 +3648,7 @@ class MainWindow(QMainWindow):
             event.ignore()
             return
         self.playback.pause()
+        self.log_explorer.cancel_file_operation()
         # Every worker thread is a child of this window, and Qt terminates the
         # application when one is destroyed while it runs. None can be
         # stopped part-way, so a close during Decode, a calculation or

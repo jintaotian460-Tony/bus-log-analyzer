@@ -225,6 +225,8 @@ class ScenarioDriver(QObject):
                 yield from self._window_lists_only(record)
             elif step['op'] == 'inheritance_by_name':
                 yield from self._inheritance_by_name(step, record)
+            elif step['op'] == 'observation_style':
+                yield from self._observation_style(step, record)
             elif step['op'] == 'close_during_load':
                 yield from self._close_during_load(record)
                 return
@@ -505,6 +507,90 @@ class ScenarioDriver(QObject):
             record['signals_restored'] = window.signal_dock.isVisible()
         finally:
             explorer.fileActivated.disconnect(request_received)
+
+    def _observation_style(self, step: dict, record: dict):
+        """Render actual recording data and exercise the compact local legends."""
+        from PySide6.QtCore import Qt, QPoint, QPointF, QEvent
+        from PySide6.QtGui import QMouseEvent
+        from PySide6.QtWidgets import QComboBox
+        from PySide6.QtTest import QTest
+        from gui import plot_windows, observation_style
+        window, panel = self._window, self._window.plot_panel
+        deadline = time.monotonic() + LOAD_TIMEOUT
+        while window._thread is not None:
+            if time.monotonic() > deadline:
+                raise RuntimeError('Observation recording load timed out')
+            yield
+        assert window.store is not None
+        window.left_dock.hide()
+        window.bottom_dock.hide()
+        window.signal_dock.hide()
+        window.resize(1600, 950)
+        panel.clear_all()
+        panel.apply_window_layout([dict(id=0, name='窗口 1', axis_mode='shared', height=220, keys=[])])
+        panel.set_windows(True)
+        by_name = {window.store.get_series(key).signal_name: key for key in window.store.all_keys()}
+        for index, group in enumerate(step['groups']):
+            if index:
+                panel.new_window()
+            window.add_signals_to_plot([by_name[name] for name in group['signals']])
+            panel._window_specs[index]['name'] = group['name']
+        panel.redraw()
+        panel.fit_to_window()
+        panel.set_background_color('#000000')
+        window.btn_cursor1.setChecked(True)
+        window.btn_cursor2.setChecked(True)
+        panel.move_cursor1(35.01)
+        panel.move_cursor2(140.01)
+        yield from self._wait(.4)
+        original = {key: item.series for key, item in panel._items.items()}
+        for _widget, tree, _title in panel._window_widgets.values():
+            assert not tree.isColumnHidden(1) and not tree.isColumnHidden(2)
+            for key, item in tree.rows.items():
+                assert item.foreground(0).color().name() == observation_style.TEXT
+                assert not item.icon(0).isNull()
+                assert item.text(1) == panel.table.item(panel._row_lookup[key], 2).text()
+        screenshot = str(self._result_path.with_suffix('.observation.png'))
+        assert window.grab().save(screenshot)
+        # Native mouse drag on the top cursor, including its new triangle handle.
+        plot = panel._stacked_plots[0]
+        y0, y1 = plot.vb.viewRange()[1]
+        start = panel.glw.mapFromScene(plot.vb.mapViewToScene(QPointF(35.01, y0+.98*(y1-y0))))
+        end = start + QPoint(25, 0)
+        viewport = panel.glw.viewport()
+        QTest.mousePress(viewport, Qt.MouseButton.LeftButton, pos=start)
+        QApplication.sendEvent(viewport, QMouseEvent(QEvent.Type.MouseMove, QPointF(end),
+            QPointF(viewport.mapToGlobal(end)), Qt.MouseButton.NoButton,
+            Qt.MouseButton.LeftButton, Qt.KeyboardModifier.NoModifier))
+        QTest.mouseRelease(viewport, Qt.MouseButton.LeftButton, pos=end)
+        yield from self._wait(.2)
+        assert panel.v_line.value() > 35.01
+        assert all(abs(line.value()-panel.v_line.value()) < 1e-6 for line in panel._stacked_c1_lines)
+        widget, tree, _title = panel._window_widgets[panel._window_specs[0]['id']]
+        first_key = next(iter(tree.rows))
+        tree.rows[first_key].setCheckState(0, Qt.CheckState.Unchecked)
+        yield from self._wait(.2)
+        assert not panel._items[first_key].curve.isVisible()
+        panel._window_widgets[panel._window_specs[0]['id']][1].rows[first_key].setCheckState(0, Qt.CheckState.Checked)
+        yield from self._wait(.2)
+        combo = panel._window_widgets[panel._window_specs[0]['id']][0].findChild(QComboBox)
+        combo.setCurrentIndex(1)
+        yield from self._wait(.3)
+        assert len(panel._window_extra_axes) == len(step['groups'][0]['signals'])-1
+        independent = str(self._result_path.with_suffix('.observation-independent.png'))
+        assert window.grab().save(independent)
+        panel.set_background_color('#ffffff')
+        yield from self._wait(.2)
+        light = str(self._result_path.with_suffix('.observation-light.png'))
+        assert window.grab().save(light)
+        panel.set_background_color('#000000')
+        panel._window_widgets[panel._window_specs[0]['id']][0].findChild(QComboBox).setCurrentIndex(0)
+        yield from self._wait(.2)
+        assert all(panel._items[key].series is value for key, value in original.items())
+        record.update(outcome='passed', signals=len(original), local_legends=True,
+                      cursor_handle_drag=True, cursor_values=True, visibility_toggle=True,
+                      independent_axes=True, background_switch=True, original_data=True,
+                      screenshot=screenshot, independent_screenshot=independent, light_screenshot=light)
 
     def _window_lists_only(self, record: dict):
         """The real startup/load path must reclaim the obsolete global list."""
@@ -1004,6 +1090,9 @@ class ScenarioDriver(QObject):
             yield
         panel = window.plot_panel
         panel.clear_all()
+        # A preceding scenario can leave several windows. Clearing signals
+        # deliberately preserves their layout; this geometry fixture needs one.
+        panel.apply_window_layout([dict(id=0, name='窗口 1', axis_mode='shared', height=220, keys=[])])
         window.btn_windows.setChecked(True)
         window.left_dock.show()
         window.bottom_dock.show()
@@ -1015,6 +1104,7 @@ class ScenarioDriver(QObject):
         window.add_signal_to_plot(keys[2])
         panel.new_window()
         window.add_signal_to_plot(keys[3])
+        assert len(panel._window_specs) == 3
         for spec, height in zip(panel._window_specs, (160, 320, 160)):
             spec['height'] = height
         plot_windows.arrange(panel)

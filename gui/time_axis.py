@@ -3,6 +3,7 @@ import math
 
 import pyqtgraph as pg
 from PySide6.QtCore import QPointF, Qt
+from gui.observation_style import ObservationGrid
 
 
 class TimePan:
@@ -25,7 +26,7 @@ class TimePan:
         self.view.setXRange(low-shift, high-shift, padding=0)
 
 
-class TimeAxis(pg.AxisItem):
+class TimeAxis(ObservationGrid, pg.AxisItem):
     def __init__(self, preferred_minor=None, color='#ffffff', on_pan=None):
         super().__init__('bottom')
         self._on_pan = on_pan

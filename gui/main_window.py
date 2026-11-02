@@ -386,6 +386,7 @@ class MainWindow(QMainWindow):
 
     def _build_ui(self) -> None:
         from gui.log_explorer import LogExplorer
+        from gui.observation_style import CONTROLS
         self.log_explorer = LogExplorer()
         self.log_explorer.fileActivated.connect(lambda path: self.open_measurement_path(path, auto_decode=True))
         self.log_explorer.operationCompleted.connect(self._log)
@@ -393,6 +394,7 @@ class MainWindow(QMainWindow):
         self.signal_tree = SignalTreeWidget()
         self.plot_panel = PlotPanel()
         self.playback = PlaybackBar(self)
+        self.playback.setStyleSheet(CONTROLS)
         self.playback.positionChanged.connect(self._playback_position)
         self.playback.gapTimeoutChanged.connect(self._playback_gap_changed)
         self.plot_panel.cursor1Moved.connect(self._playback_cursor_moved)
@@ -429,6 +431,7 @@ class MainWindow(QMainWindow):
         self.plot_panel.eventsToggled.connect(self._toggle_measurement_events)
 
         self.plot_button_row = OverflowButtonRow()
+        self.plot_button_row.setStyleSheet(CONTROLS)
         self.btn_fit = icon_button('fit_window', 'Fit to Window', 'Fit to Window (F)')
         self.btn_fit_v = icon_button('fit_vertical', 'Fit Vertical',
                                      'Fit Vertical (V): fit the height, keep the time range')

@@ -7,15 +7,16 @@ from PySide6.QtGui import QColor, QBrush, QDrag, QPainter, QPen
 from PySide6.QtWidgets import (QWidget, QVBoxLayout, QHBoxLayout, QToolButton,
                               QComboBox, QTreeWidget, QTreeWidgetItem,
                               QGraphicsProxyWidget, QGraphicsWidget, QMenu, QInputDialog,
-                              QAbstractItemView)
+                              QAbstractItemView, QHeaderView, QSizePolicy)
 
 from gui.signal_tree import SignalTreeWidget
 from gui.edge_tab import EdgeTab
 from gui.time_axis import TimePan
+from gui import observation_style
 
 
 MIN_WINDOW_HEIGHT = 120
-RULER_HEIGHT = 44
+RULER_HEIGHT = 30
 
 
 class TimelineRuler(QWidget):
@@ -52,8 +53,10 @@ class TimelineRuler(QWidget):
                 x = left + (value-low) * (right-left) / (high-low)
                 painter.drawLine(QPoint(round(x), 1), QPoint(round(x), 9 if level == 0 else 5))
                 if level == 0:
-                    painter.drawText(QRectF(x-45, 10, 90, 17), Qt.AlignmentFlag.AlignHCenter, label)
-        painter.drawText(QRectF(left, 27, right-left, 16), Qt.AlignmentFlag.AlignHCenter, 'Time (seconds)')
+                    label_width = painter.fontMetrics().horizontalAdvance(label) + 4
+                    label_left = max(left, min(x-label_width/2, min(right, self.width()-2)-label_width))
+                    painter.drawText(QRectF(label_left, 10, label_width, 17), Qt.AlignmentFlag.AlignHCenter, label)
+        painter.drawText(QRectF(2, 10, max(0, left-8), 17), Qt.AlignmentFlag.AlignRight, 't / s')
 
     def wheelEvent(self, event):
         self.panel._driving_vb().scaleBy(x=.8 if event.angleDelta().y() > 0 else 1.25)
@@ -121,8 +124,11 @@ class WindowSignals(QTreeWidget):
         self.setColumnCount(3)
         self.setHeaderLabels(['信号', 'C1', 'C2'])
         self.setToolTip('按住信号名称拖到另一窗口的列表或绘图区，可移动信号；Ctrl/Shift 多选后可一起拖动。Ctrl+Z 撤销。右键调整样式。')
-        self.setColumnWidth(0, 165)
-        self.setColumnWidth(1, 75)
+        self.header().setStretchLastSection(False)
+        self.header().setSectionResizeMode(0, QHeaderView.ResizeMode.Stretch)
+        for column in (1, 2):
+            self.header().setSectionResizeMode(column, QHeaderView.ResizeMode.Interactive)
+            self.setColumnWidth(column, 82)
         self.setRootIsDecorated(False)
         self.setSelectionMode(QAbstractItemView.SelectionMode.ExtendedSelection)
         self.setDragEnabled(True)
@@ -294,11 +300,19 @@ def move_window(panel, window, direction):
 
 def make_list(panel, window, keys, row, last=False):
     widget = QWidget()
+    widget.setObjectName('observationLegend')
+    widget.setStyleSheet(observation_style.LEGEND)
     layout = QVBoxLayout(widget)
     layout.setContentsMargins(0, 0, 0, 0)
     layout.setSpacing(0)
     toolbar = QHBoxLayout()
+    toolbar.setContentsMargins(2, 1, 2, 1)
+    toolbar.setSpacing(2)
     title = QToolButton()
+    title.setObjectName('windowTitle')
+    title.setMinimumWidth(0)
+    title.setSizePolicy(QSizePolicy.Policy.Ignored, QSizePolicy.Policy.Fixed)
+    title.setFixedHeight(21)
     title.setText(window['name'])
     title.setCheckable(True)
     title.setChecked(window['id'] == panel._window_active_id)
@@ -311,21 +325,24 @@ def make_list(panel, window, keys, row, last=False):
             title.setText(window['name'])
     title.customContextMenuRequested.connect(rename)
     title.setToolTip('点击设为添加信号的目标窗口；右键重命名')
-    toolbar.addWidget(title)
-    toolbar.addStretch()
+    toolbar.addWidget(title, 1)
+    axis_mode = QComboBox()
+    axis_mode.addItem('共轴', 'shared')
+    axis_mode.addItem('独立轴', 'individual')
+    axis_mode.setToolTip('此窗口内所有信号共用 Y 轴，或每条信号使用独立 Y 轴')
+    axis_mode.setFixedSize(74, 21)
+    axis_mode.setCurrentIndex(1 if window['axis_mode'] == 'individual' else 0)
+    toolbar.addWidget(axis_mode)
     for text, tip, action in [('↑', '上移窗口', lambda: move_window(panel, window, -1)),
                               ('↓', '下移窗口', lambda: move_window(panel, window, 1)),
                               ('×', '关闭此窗口及其曲线', lambda: close_window(panel, window))]:
         button = QToolButton()
         button.setText(text)
+        button.setFixedSize(19, 21)
         button.setToolTip(tip)
         button.clicked.connect(lambda _checked=False, action=action: QTimer.singleShot(0, panel, action))
         toolbar.addWidget(button)
     layout.addLayout(toolbar)
-    axis_mode = QComboBox()
-    axis_mode.addItem('全部共轴', 'shared')
-    axis_mode.addItem('每条信号独立轴', 'individual')
-    axis_mode.setCurrentIndex(1 if window['axis_mode'] == 'individual' else 0)
     def change_mode():
         panel._push_undo()
         window['axis_mode'] = axis_mode.currentData()
@@ -337,7 +354,6 @@ def make_list(panel, window, keys, row, last=False):
         # from the combo/list event before disposing its sender.
         QTimer.singleShot(0, panel, redraw)
     axis_mode.currentIndexChanged.connect(change_mode)
-    layout.addWidget(axis_mode)
     tree = WindowSignals(panel, window)
     tree.setFrameShape(QTreeWidget.Shape.NoFrame)
     tree.setMinimumHeight(0)
@@ -349,8 +365,12 @@ def make_list(panel, window, keys, row, last=False):
         item.setData(0, Qt.ItemDataRole.UserRole, key)
         item.setFlags(item.flags() | Qt.ItemFlag.ItemIsUserCheckable)
         item.setCheckState(0, Qt.CheckState.Checked if plotted.visible else Qt.CheckState.Unchecked)
-        color = '#888888' if plotted.unavailable_reason or not plotted.visible else plotted.color
-        item.setForeground(0, QBrush(QColor(color)))
+        muted = bool(plotted.unavailable_reason or not plotted.visible)
+        item.setForeground(0, QBrush(QColor(observation_style.MUTED if muted else observation_style.TEXT)))
+        item.setIcon(0, observation_style.swatch(observation_style.MUTED if muted else plotted.color,
+                                               plotted.line_style))
+        for column in (1, 2):
+            item.setTextAlignment(column, Qt.AlignmentFlag.AlignRight | Qt.AlignmentFlag.AlignVCenter)
         item.setToolTip(0, f'{key}\n单位：{plotted.series.unit or "无"}\n{plotted.unavailable_reason}')
         tree.addTopLevelItem(item)
         tree.rows[key] = item
@@ -362,7 +382,7 @@ def make_list(panel, window, keys, row, last=False):
     # real, interactive tree all the way down to the cursor/file information.
     panel.glw.addItem(proxy, row=row, col=0, rowspan=2 if last else 1)
     panel._window_widgets[window['id']] = (widget, tree, title)
-    panel.glw.ci.layout.setColumnFixedWidth(0, 330)
+    panel.glw.ci.layout.setColumnFixedWidth(0, observation_style.LIST_WIDTH)
 
 
 def finish_rows(panel):
@@ -414,8 +434,11 @@ def axes_for_window(panel, plot, window, keys, width):
         for index, key in enumerate(visible[1:], 1):
             plotted = panel._items[key]
             view = pg.ViewBox(enableMenu=False)
-            axis = pg.AxisItem('left')
-            axis.setLabel(plotted.series.signal_name, units=plotted.series.unit, color=plotted.color)
+            axis = observation_style.ValueAxis('left')
+            axis.setWidth(observation_style.AXIS_WIDTH)
+            axis.setZValue(20)
+            axis.setLabel(plotted.series.unit or '', color=plotted.color)
+            axis.setToolTip(f'{plotted.series.signal_name}\n{plotted.series.unit or "无单位"}')
             axis.setPen(pg.mkPen(plotted.color))
             axis.setTextPen(pg.mkPen(plotted.color))
             plot.scene().addItem(view)
@@ -436,7 +459,8 @@ def axes_for_window(panel, plot, window, keys, width):
                     # geometry is known. Those are not horizontal user zooms.
                     view.setGeometry(rect)
                     view.setXRange(*bounds, padding=0)
-                    axis.setGeometry(QRectF(rect.left() - (index+1)*85, rect.top(), 85, rect.height()))
+                    width = observation_style.AXIS_WIDTH
+                    axis.setGeometry(QRectF(rect.left() - (index+1)*width, rect.top(), width, rect.height()))
             finally:
                 panel._window_time_syncing = was_syncing
         plot.vb.sigResized.connect(geometry)
@@ -561,6 +585,32 @@ def refresh_values(panel):
             for column in (1, 2):
                 cell = panel.table.item(row, column+1)
                 item.setText(column, cell.text() if cell else '')
+                item.setToolTip(column, cell.toolTip() if cell else '')
+        for column, line in ((1, panel.v_line), (2, panel.v_line2)):
+            tree.headerItem().setToolTip(column, f'C{column}  t = {line.value():.6f} s')
+
+
+def refresh_signal_style(panel, key):
+    plotted = panel._items.get(key)
+    if plotted is None or plotted.window_id not in panel._window_widgets:
+        return
+    tree = panel._window_widgets[plotted.window_id][1]
+    item = tree.rows.get(key)
+    if item is None:
+        return
+    blocked = tree.blockSignals(True)
+    try:
+        muted = bool(plotted.unavailable_reason or not plotted.visible)
+        item.setForeground(0, QBrush(QColor(observation_style.MUTED if muted else observation_style.TEXT)))
+        item.setIcon(0, observation_style.swatch(observation_style.MUTED if muted else plotted.color,
+                                               plotted.line_style))
+    finally:
+        tree.blockSignals(blocked)
+    window = next(window for window in panel._window_specs if window['id'] == plotted.window_id)
+    if window['axis_mode'] == 'individual' and plotted.visible and plotted.axis is not None:
+        plotted.axis.setLabel(plotted.series.unit or '', color=plotted.color)
+        plotted.axis.setTextPen(pg.mkPen(plotted.color))
+        plotted.axis.setPen(pg.mkPen(plotted.color))
 
 
 def snapshot(panel):

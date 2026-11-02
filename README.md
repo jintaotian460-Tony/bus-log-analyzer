@@ -16,6 +16,10 @@
 
 ## Screenshots
 
+The maintained fork uses a compact offline multi-window observation area with local
+signal legends, unit-only Y axes, linked cursors and a shared draggable time ruler.
+See [offline observation layout and reference](docs/offline-observation.md).
+
 Stacked plot:
 <img width="2299" height="1588" alt="Stacked plot" src="https://github.com/user-attachments/assets/57baedc2-0382-4f63-a7e9-cc786e18ded8" />
 

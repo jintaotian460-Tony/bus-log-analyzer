@@ -83,6 +83,64 @@ def test_whole_window_axes_switch_and_y_ranges_are_independent(windows, qapp):
     assert panel._items[a.key].view_box.viewRange()[1][1] < 30
 
 
+def test_legends_use_color_samples_and_keep_names_and_cursor_values_readable(windows, qapp):
+    from PySide6.QtCore import Qt
+    from gui import observation_style
+    panel = windows
+    signal = series('Long_signal_name_that_used_to_fill_the_vertical_axis')
+    panel.add_series(signal.key, signal, color='#ffff00')
+    panel.set_cursor1_enabled(True)
+    panel.set_cursor2_enabled(True)
+    panel.move_cursor1(3)
+    panel.move_cursor2(4)
+    settle(qapp)
+    tree = panel._window_widgets[0][1]
+    item = tree.rows[signal.key]
+    assert item.text(0) == signal.signal_name
+    assert item.foreground(0).color().name() == observation_style.TEXT
+    assert not item.icon(0).isNull()
+    assert item.text(1) == '30.000' and item.text(2) == '40.000'
+    assert item.textAlignment(1) & Qt.AlignmentFlag.AlignRight
+    assert '3.000000' in tree.headerItem().toolTip(1)
+    assert panel._items[signal.key].axis.labelText == 'V'
+    assert signal.signal_name in panel._items[signal.key].axis.toolTip()
+    old_icon = item.icon(0).cacheKey()
+    panel.set_series_color(signal.key, '#ff0000')
+    assert item.icon(0).cacheKey() != old_icon
+    curve = panel._items[signal.key].curve
+    data = curve.xData, curve.yData
+    old_icon = item.icon(0).cacheKey()
+    panel.set_series_line_style(signal.key, 'dash')
+    assert item.icon(0).cacheKey() != old_icon
+    assert curve.xData is data[0] and curve.yData is data[1]
+    item.setCheckState(0, Qt.CheckState.Unchecked)
+    settle(qapp)
+    assert not panel._items[signal.key].curve.isVisible()
+    assert panel._window_widgets[0][1].rows[signal.key].foreground(0).color().name() == observation_style.MUTED
+    assert panel._items[signal.key].series is signal
+
+
+def test_window_axis_labels_follow_units_and_background_without_changing_data(windows, qapp):
+    from gui.observation_style import AXIS_WIDTH
+    panel = windows
+    a, b = series('A', 'V'), series('B', 'rpm', 100)
+    panel.add_series(a.key, a)
+    panel.add_series(b.key, b)
+    assert panel._items[a.key].axis.labelText == 'V / rpm'
+    panel._window_specs[0]['axis_mode'] = 'individual'
+    panel.redraw()
+    settle(qapp)
+    assert panel._items[a.key].axis.labelText == 'V'
+    assert panel._items[b.key].axis.labelText == 'rpm'
+    assert panel._items[b.key].axis.width() == AXIS_WIDTH
+    panel.set_background_color('#ffffff')
+    settle(qapp)
+    for plot in panel._stacked_plots:
+        assert plot.getAxis('bottom').observation_background == '#ffffff'
+        assert plot.getAxis('bottom').textPen().color().name() == '#000000'
+    assert panel._items[a.key].series is a and panel._items[b.key].series is b
+
+
 def test_window_order_height_close_and_undo(windows, qapp):
     panel = windows
     a, b = series('A'), series('B')

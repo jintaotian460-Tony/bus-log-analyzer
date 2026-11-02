@@ -58,7 +58,7 @@ from gui.edge_tab import _mix
 from gui.plot_tag import SEPARATOR, TAG_HINT, PlotTag, PlotTagDialog, current_user_name
 from gui.signal_tree import SignalTreeWidget
 from gui.time_axis import TimeAxis
-from gui import plot_windows
+from gui import plot_windows, observation_style
 
 
 # A cursor is black on a light plot background and white on a dark one.
@@ -2631,7 +2631,7 @@ class PlotPanel(QWidget):
             if window:
                 plot_windows.make_list(self, window, row_keys, idx, last=idx == n-1)
             # Use custom axis: bottom-anchored, row-clipped label
-            _left_ax = _StackedLeftAxis('left')
+            _left_ax = observation_style.ValueAxis('left') if window else _StackedLeftAxis('left')
             p: pg.PlotItem = self.glw.addPlot(
                 row=idx, col=1 if self._windows_mode else 0,
                 axisItems={'left': _left_ax, 'bottom': TimeAxis(self._time_minor_spacing, _cursor_color_on(self._background_color), on_pan=self.begin_time_pan)},
@@ -2641,6 +2641,7 @@ class PlotPanel(QWidget):
             if self._windows_mode:
                 p.layout.setContentsMargins(0, 0, 0, 0)
                 p.layout.setSpacing(0)
+                observation_style.style_axes(p, self._background_color)
             p.setMenuEnabled(False)
 
             names = ', '.join(self._items[key].series.signal_name for key in row_keys)
@@ -2653,16 +2654,23 @@ class PlotPanel(QWidget):
                 first = next((self._items[key] for key in row_keys if self._items[key].visible), first)
                 names = first.series.signal_name
                 units = [first.series.unit] if first.series.unit else []
-            if units:
+            if window:
+                ylabel = ' / '.join(units)
+            elif units:
                 ylabel = (
                     f'{names}<br><span style="font-size:80%">'
                     f'({" / ".join(units)})</span>'
                 )
             else:
                 ylabel = names
-            p.setLabel('left', ylabel, color=first.color if first else '#aaaaaa')
-            p.getAxis('left').setTextPen(pg.mkPen(first.color if first else '#aaaaaa'))
-            p.getAxis('left').setWidth(85)
+            axis_color = first.color if first else '#aaaaaa'
+            if window and window['axis_mode'] == 'shared':
+                axis_color = _cursor_color_on(self._background_color)
+            p.setLabel('left', ylabel, color=axis_color)
+            p.getAxis('left').setTextPen(pg.mkPen(axis_color))
+            p.getAxis('left').setWidth(observation_style.AXIS_WIDTH if window else 85)
+            if window:
+                p.getAxis('left').setToolTip(names + ('\n' + ' / '.join(units) if units else ''))
             p.showAxis('right', False)
             p.showAxis('top',   False)
 
@@ -2684,7 +2692,8 @@ class PlotPanel(QWidget):
             if window:
                 axis_count = max((sum(self._items[key].visible for key in keys) if spec['axis_mode'] == 'individual' else 1)
                                  for (_identifier, keys), spec in zip(rows, self._window_specs))
-                views = plot_windows.axes_for_window(self, p, window, row_keys, max(85, axis_count*85))
+                views = plot_windows.axes_for_window(self, p, window, row_keys,
+                                                     max(1, axis_count)*observation_style.AXIS_WIDTH)
 
             for key in row_keys:
                 plotted = self._items[key]
@@ -2706,10 +2715,13 @@ class PlotPanel(QWidget):
             # Each row gets its own InfiniteLine instance.
             # A QGraphicsItem can only belong to ONE scene — sharing across
             # GLW rows causes crashes. Sync is done in _on_stacked_c1/c2_moved.
-            _c1_label     = 'C1' if idx == n - 1 else ''
-            _c1_labelOpts = {'position': 0.95} if idx == n - 1 else {}
+            label_row = idx == (0 if window else n-1)
+            _c1_label     = 'C1' if label_row else ''
+            _c1_labelOpts = {'position': 0.95} if label_row else {}
             c1 = _CursorLine(_c1_label, _c1_labelOpts,
                              _cursor_color_on(self._background_color))
+            if window and idx == 0:
+                c1.addMarker('v', position=.98, size=11)
             c1.setPos(self.v_line.value())
             c1.sigPositionChanged.connect(self._on_stacked_c1_moved)
             # Respect current cursor1 toggle state on rebuild
@@ -2718,10 +2730,12 @@ class PlotPanel(QWidget):
             self._stacked_c1_lines.append(c1)
 
             if self._cursor2_enabled:
-                _c2_label     = 'C2' if idx == n - 1 else ''
-                _c2_labelOpts = {'position': 0.85} if idx == n - 1 else {}
+                _c2_label     = 'C2' if label_row else ''
+                _c2_labelOpts = {'position': 0.85} if label_row else {}
                 c2 = _CursorLine(_c2_label, _c2_labelOpts,
                                  _cursor_color_on(self._background_color), dashed=True)
+                if window and idx == 0:
+                    c2.addMarker('v', position=.98, size=11)
                 c2.setPos(self.v_line2.value())
                 c2.sigPositionChanged.connect(self._on_stacked_c2_moved)
                 p.addItem(c2, ignoreBounds=True)
@@ -4037,6 +4051,8 @@ class PlotPanel(QWidget):
             plotted.scatter.setBrush(pg.mkBrush(color))
         self._refresh_table_and_cursors()
         self._set_axis_label(self._current_key)
+        if self._windows_mode:
+            plot_windows.refresh_signal_style(self, key)
         self.signalColorChanged.emit(key, color)
 
     def series_colors(self) -> dict[str, str]:
@@ -4055,6 +4071,8 @@ class PlotPanel(QWidget):
         # Cheap pen-only update: the data arrays are not re-read.
         self._apply_curve_style(plotted, set_data=False,
                                 selected=key in self.selected_keys())
+        if self._windows_mode:
+            plot_windows.refresh_signal_style(self, key)
         self.signalLineStyleChanged.emit(key, style)
 
     def series_line_styles(self) -> dict[str, str]:
@@ -4081,6 +4099,14 @@ class PlotPanel(QWidget):
         for plot in [self.plot.plotItem, *self._stacked_plots]:
             plot.getAxis('bottom').setPen(pg.mkPen(cursor_color, width=1))
             plot.getAxis('bottom').setTextPen(pg.mkPen(cursor_color))
+        if self._windows_mode:
+            for plot, window in zip(self._stacked_plots, self._window_specs):
+                observation_style.style_axes(plot, color)
+                if window['axis_mode'] == 'shared':
+                    axis = plot.getAxis('left')
+                    axis.setTextPen(pg.mkPen(cursor_color))
+                    axis.setLabel(axis.labelText, color=cursor_color)
+            self.window_ruler.update()
         for line in (self.v_line, self.v_line2,
                      *self._stacked_c1_lines, *self._stacked_c2_lines):
             line.set_color(cursor_color)

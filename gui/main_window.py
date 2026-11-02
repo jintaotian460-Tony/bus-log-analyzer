@@ -284,6 +284,7 @@ class MainWindow(QMainWindow):
         self._pending_plot_groups:  dict[str, str]  = {}
         self._pending_plot_axis_visible: dict[str, bool] = {}
         self._pending_plot_own_axis: dict[str, bool] = {}
+        self._pending_plot_axis_override: dict[str, str | None] = {}
         self._pending_plot_multistack: dict[str, int] = {}
         self._pending_plot_type: str | None = None
         self._temporary_plot_handoff: dict | None = None
@@ -1348,6 +1349,7 @@ class MainWindow(QMainWindow):
                     'group': self.plot_panel._items[key].group,
                     'axis_visible': self.plot_panel._items[key].axis_visible,
                     'own_axis': self.plot_panel._items[key].own_axis,
+                    'axis_override': self.plot_panel._items[key].axis_override,
                     'multistack_id': self.plot_panel._items[key].multistack_id,
                     'line_style': self.plot_panel._items[key].line_style,
                 }
@@ -1398,6 +1400,11 @@ class MainWindow(QMainWindow):
         self._pending_plot_own_axis = {
             str(signal['key']): bool(signal['own_axis'])
             for signal in signals if 'own_axis' in signal
+        }
+        self._pending_plot_axis_override = {
+            str(signal['key']): (signal['axis_override'] if isinstance(signal.get('axis_override'), str)
+                                 and signal['axis_override'] else None)
+            for signal in signals if 'axis_override' in signal
         }
         self._pending_plot_multistack = {
             str(signal['key']): int(signal['multistack_id'])
@@ -1506,6 +1513,7 @@ class MainWindow(QMainWindow):
         self._pending_plot_groups = {}
         self._pending_plot_axis_visible = {}
         self._pending_plot_own_axis = {}
+        self._pending_plot_axis_override = {}
         self._pending_plot_multistack = {}
         self._pending_plot_type = None
         self._release_store()
@@ -1905,6 +1913,8 @@ class MainWindow(QMainWindow):
             plotted.axis_visible = self._pending_plot_axis_visible.pop(key)
         if key in self._pending_plot_own_axis:
             plotted.own_axis = self._pending_plot_own_axis.pop(key)
+        if key in self._pending_plot_axis_override:
+            plotted.axis_override = self._pending_plot_axis_override.pop(key)
         if key in self._pending_plot_multistack:
             plotted.multistack_id = self._pending_plot_multistack.pop(key)
 
@@ -2006,6 +2016,7 @@ class MainWindow(QMainWindow):
             self._pending_plot_groups,
             self._pending_plot_axis_visible,
             self._pending_plot_own_axis,
+            self._pending_plot_axis_override,
             self._pending_plot_multistack,
         ):
             if key in state:
@@ -2452,6 +2463,7 @@ class MainWindow(QMainWindow):
                     'group':        self.plot_panel._items[k].group,
                     'axis_visible': self.plot_panel._items[k].axis_visible,
                     'own_axis':     self.plot_panel._items[k].own_axis,
+                    'axis_override': self.plot_panel._items[k].axis_override,
                     'multistack_id': self.plot_panel._items[k].multistack_id,
                     'line_style':   self.plot_panel._items[k].line_style,
                 }

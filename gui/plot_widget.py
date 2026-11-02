@@ -340,6 +340,7 @@ class PlottedSignal:
     axis_visible: bool = True   # multi-axis mode: show/hide the Y axis for this signal
     unit_group: str = ''        # multi-axis mode: normalized unit-group key
     own_axis: bool = False      # multi-axis mode: detach onto individual Y axis
+    axis_override: str | None = None  # multi-axis: ride this unit-group key instead of own unit
     multistack_id: int = -1     # MultiStack row; -1 means not assigned yet
     line_style: str = DEFAULT_LINE_STYLE   # key into LINE_STYLES
     unavailable_reason: str = ''  # inherited presentation only; no old samples
@@ -1858,6 +1859,21 @@ class PlotPanel(QWidget):
             return unit.strip().lower()
         return f'__no_unit__{signal_key}'
 
+    def _effective_key(self, key: str) -> str:
+        """The unit-group a plotted signal currently rides on.
+
+        An explicit axis_override (chosen in the signal's right-click menu)
+        wins over the unit-derived key, so a signal can share another group's
+        axis instead of claiming a new axis strip for its unit. own_axis and
+        axis_override are mutually exclusive; the menu keeps them in step.
+        """
+        plotted = self._items[key]
+        if plotted.own_axis:
+            return self._unit_key(plotted.series.unit, key, True)
+        if plotted.axis_override:
+            return plotted.axis_override
+        return self._unit_key(plotted.series.unit, key, False)
+
     def _current_view_centre(self) -> float:
         """Return the x-centre of the currently visible range (any mode)."""
         try:
@@ -2295,7 +2311,7 @@ class PlotPanel(QWidget):
                 for key, plotted in self._items.items():
                     if not plotted.visible:
                         continue
-                    ukey = self._unit_key(plotted.series.unit, key, plotted.own_axis)
+                    ukey = self._effective_key(key)
                     if ukey in _seen_ukeys:
                         continue
                     _seen_ukeys.add(ukey)
@@ -2528,14 +2544,14 @@ class PlotPanel(QWidget):
         for key, plotted in self._items.items():
             if not plotted.visible:
                 plotted.curve      = None
-                plotted.unit_group = self._unit_key(plotted.series.unit, key, plotted.own_axis)
+                plotted.unit_group = self._effective_key(key)
 
         # Build ordered unit groups (insertion-order of first visible signal per unit)
         unit_groups: dict[str, list[str]] = {}
         for key, plotted in self._items.items():
             if not plotted.visible:
                 continue
-            ukey = self._unit_key(plotted.series.unit, key, plotted.own_axis)
+            ukey = self._effective_key(key)
             if ukey not in unit_groups:
                 unit_groups[ukey] = []
             unit_groups[ukey].append(key)
@@ -4204,17 +4220,24 @@ class PlotPanel(QWidget):
         """Compute the Y-axis label for a unit group.
 
         Single-member group: 'unit (Name)' when unit is present, else just 'Name'.
-        Multi-member group:  unit string only (all members share the same unit).
-        Signal names longer than 20 chars are truncated with an ellipsis.
+        Multi-member group: the unit string — every distinct unit when a manual
+        axis choice mixed them onto one axis ('°C / V'). Signal names longer
+        than 20 chars are truncated with an ellipsis.
         """
-        first = self._items[keys[0]]
-        unit = (first.series.unit or '').strip()
+        units = []
+        for key in keys:
+            unit = (self._items[key].series.unit or '').strip()
+            if unit and unit not in units:
+                units.append(unit)
+        if not units:
+            name = self._items[keys[0]].series.signal_name
+            return name[:19] + '…' if len(name) > 20 else name
         if len(keys) == 1:
-            name = first.series.signal_name
+            name = self._items[keys[0]].series.signal_name
             if len(name) > 20:
                 name = name[:19] + '…'
-            return f'{unit} ({name})' if unit else name
-        return unit
+            return f'{units[0]} ({name})'
+        return ' / '.join(units)
 
     def _set_axis_label(self, key: str | None) -> None:
         if self._stacked_mode:
@@ -4292,7 +4315,7 @@ class PlotPanel(QWidget):
         for key, plotted in self._items.items():
             if not plotted.visible:
                 continue
-            ukey = self._unit_key(plotted.series.unit, key, plotted.own_axis)
+            ukey = self._effective_key(key)
             if ukey not in _unit_axis_colors:
                 _unit_axis_colors[ukey] = plotted.color
 
@@ -4344,7 +4367,7 @@ class PlotPanel(QWidget):
                     item.setForeground(brush)
                 chk_item.setForeground(brush)
                 # Col 5: Ax — colored swatch showing the unit-group axis color
-                ukey         = self._unit_key(plotted.series.unit, key, plotted.own_axis)
+                ukey         = self._effective_key(key)
                 swatch_color = _unit_axis_colors.get(ukey, '#606060')
                 sw_item = QTableWidgetItem('▮')
                 sw_item.setFlags(Qt.ItemFlag.ItemIsEnabled | Qt.ItemFlag.ItemIsSelectable)
@@ -4439,6 +4462,7 @@ class PlotPanel(QWidget):
                 group=v.group,
                 axis_visible=v.axis_visible,
                 own_axis=v.own_axis,
+                axis_override=v.axis_override,
                 multistack_id=v.multistack_id,
                 line_style=v.line_style,
                 unavailable_reason=v.unavailable_reason,
@@ -5103,13 +5127,11 @@ class PlotPanel(QWidget):
             return
 
         target_ukeys = {
-            self._unit_key(
-                self._items[key].series.unit, key, self._items[key].own_axis
-            )
+            self._effective_key(key)
             for key in keys
         }
         for key, plotted in self._items.items():
-            ukey = self._unit_key(plotted.series.unit, key, plotted.own_axis)
+            ukey = self._effective_key(key)
             if ukey in target_ukeys:
                 plotted.axis_visible = visible
 
@@ -5117,9 +5139,7 @@ class PlotPanel(QWidget):
         for target_ukey in target_ukeys:
             group_keys = [
                 key for key, plotted in self._items.items()
-                if self._unit_key(
-                    plotted.series.unit, key, plotted.own_axis
-                ) == target_ukey
+                if self._effective_key(key) == target_ukey
             ]
             if not group_keys:
                 continue
@@ -5166,7 +5186,47 @@ class PlotPanel(QWidget):
         for key in keys:
             if key in self._items:
                 self._items[key].own_axis = enabled
+                if enabled:
+                    self._items[key].axis_override = None
         self._rebuild_curves(preserve_selection=True)
+
+    def _set_axis_override(self, keys: list[str], target: str | None) -> None:
+        """Ride the selected signals on another unit group's Y axis.
+
+        *target* is a unit-group key (None: back to the unit-derived axis).
+        Sharing an axis that already exists is what keeps every unit from
+        claiming its own axis strip; it replaces nothing about the signal
+        except the axis it is scaled on.
+        """
+        self._push_undo()
+        for key in keys:
+            if key in self._items:
+                self._items[key].own_axis = False
+                self._items[key].axis_override = target
+        self._rebuild_curves(preserve_selection=True)
+
+    def _axis_choice_groups(self) -> list[tuple[str, str, list[str]]]:
+        """The axes a signal can be sent to: (key, menu label, member keys).
+
+        Only groups with at least one visible signal are offered — an axis
+        without signals takes no space and so is never a target to 'fill'.
+        """
+        groups: dict[str, list[str]] = {}
+        for key, plotted in self._items.items():
+            if not plotted.visible:
+                continue
+            ukey = self._effective_key(key)
+            groups.setdefault(ukey, []).append(key)
+        result = []
+        for ukey, member_keys in groups.items():
+            label = self._axis_group_label(member_keys)
+            sample = self._items[member_keys[0]].series.signal_name
+            if len(member_keys) > 1:
+                label = f'{label} — {len(member_keys)} 个信号'
+            else:
+                label = f'{label}（信号 {sample[:20]}）' if label != sample else label
+            result.append((ukey, label, member_keys))
+        return result
 
     def _on_table_item_double_clicked(self, item: QTableWidgetItem) -> None:
         """Double-click on a group's name → rename the group.
@@ -5328,18 +5388,42 @@ class PlotPanel(QWidget):
         if self._multistack_mode:
             menu.addSeparator()
             self._add_move_to_new_stack_action(menu, selected_keys)
-        # Multi-axis: individual axis option
+        # Multi-axis: choose which axis the signals ride on
         if self._multi_axis:
             menu.addSeparator()
             sel_signals = [k for k in selected_keys if k in self._items]
+            _keys_snap = list(selected_keys)
+            axis_menu = self._make_menu(menu)
+            axis_menu.setTitle('选择轴')
+            auto_act = QAction('自动（按单位）', axis_menu, checkable=True)
+            current_keys = {self._effective_key(k) for k in sel_signals}
+            auto_act.setChecked(not any(
+                self._items[k].own_axis or self._items[k].axis_override
+                for k in sel_signals))
+            auto_act.setEnabled(has_sel)
+            auto_act.triggered.connect(
+                lambda: self._set_axis_override(_keys_snap, None))
+            axis_menu.addAction(auto_act)
+            axis_menu.addSeparator()
+            for ukey, label, member_keys in self._axis_choice_groups():
+                # Not an option to stay: the group exists only through these signals.
+                if set(member_keys) == set(sel_signals):
+                    continue
+                group_act = QAction(label, axis_menu, checkable=True)
+                group_act.setChecked(current_keys == {ukey})
+                group_act.setEnabled(has_sel)
+                group_act.triggered.connect(
+                    lambda checked=False, t=ukey: self._set_axis_override(_keys_snap, t))
+                axis_menu.addAction(group_act)
+            axis_menu.setEnabled(has_sel)
+            menu.addMenu(axis_menu)
             all_own = bool(sel_signals) and all(self._items[k].own_axis for k in sel_signals)
-            own_act = QAction('Individual axis', menu)
+            own_act = QAction('独立轴', menu)
             own_act.setCheckable(True)
             own_act.setChecked(all_own)
             own_act.setEnabled(has_sel)
-            _keys_snap = list(selected_keys)
             own_act.triggered.connect(
-                lambda checked, ks=_keys_snap: self._set_own_axis(ks, checked)
+                lambda checked: self._set_own_axis(_keys_snap, checked)
             )
             menu.addAction(own_act)
         # Signal display sub-menu

@@ -1253,9 +1253,9 @@ class ScenarioDriver(QObject):
             assert all(item.curve.opts['pen'].widthF() == width for item in panel._items.values())
             assert all(item.curve.xData is buffers[key][0] and item.curve.yData is buffers[key][1]
                        for key, item in panel._items.items())
-        assert window._configuration_dict()['plot_line_width'] == 4
+        assert window._configuration_dict()['plot_line_width'] == LINE_WIDTHS[-1]
         record['line_widths'] = list(LINE_WIDTHS)
-        window._set_line_width(.5)
+        window._set_line_width(1)
         record['ruler_layouts'] = []
         for mode in ('windows',):
             window.btn_windows.setChecked(True)
@@ -1298,7 +1298,7 @@ class ScenarioDriver(QObject):
         panel.fit_to_window()
         yield from self._wait(.2)
         screenshots = {}
-        for width in (.5, 4):
+        for width in (1, LINE_WIDTHS[-1]):
             window._set_line_width(width)
             yield from self._wait(.2)
             path = str(self._result_path.with_suffix(f'.width-{width:g}.png'))

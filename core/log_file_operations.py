@@ -1,9 +1,11 @@
 """Copy and ZIP operations for the log explorer; never replace an existing item."""
 from dataclasses import dataclass, field
 from pathlib import Path, PureWindowsPath
+import ctypes
 import os
 import shutil
 import stat
+import sys
 import zipfile
 
 
@@ -196,4 +198,61 @@ def extract(archive_path, progress=lambda _name: None):
             result.cancelled = True
         else:
             result.errors.append(f'{archive_path.name}: {exc}')
+    return result
+
+
+class _SHFILEOPSTRUCTW(ctypes.Structure):
+    _fields_ = [
+        ('hwnd', ctypes.c_void_p),
+        ('wFunc', ctypes.c_uint),
+        ('pFrom', ctypes.c_wchar_p),
+        ('pTo', ctypes.c_wchar_p),
+        ('fFlags', ctypes.c_ushort),
+        ('fAnyOperationsAborted', ctypes.c_int),
+        ('hNameMappings', ctypes.c_void_p),
+        ('lpszProgressTitle', ctypes.c_wchar_p),
+    ]
+
+
+def delete(paths, progress=lambda _name: None):
+    """Move paths to the Windows Recycle Bin; nothing is permanently erased.
+
+    One SHFileOperation call carries every path, so a multi-selection is a
+    single undo group in the bin. A file the application still holds open —
+    the loaded measurement — is refused by Windows with a sharing violation
+    and reported as an error instead of deleted. Off Windows there is no bin
+    to go to, so nothing is deleted and every path is reported.
+    """
+    result = Result()
+    targets = []
+    for path in _sources(paths):
+        try:
+            _check_source(path)
+        except OSError as exc:
+            result.errors.append(str(exc))
+        else:
+            targets.append(Path(path).absolute())
+    if not targets:
+        return result
+    for path in targets:
+        progress(path.name)
+    if sys.platform == 'win32':
+        # pFrom is a list of paths, each NUL-terminated, closed by an extra
+        # NUL; FOF_ALLOWUNDO is what makes it a recycle instead of an erase.
+        buffer = ''.join(f'{path}\0' for path in targets) + '\0'
+        operation = _SHFILEOPSTRUCTW()
+        operation.hwnd = None
+        operation.wFunc = 3                              # FO_DELETE
+        operation.pFrom = buffer
+        operation.fFlags = 0x40 | 0x10 | 0x4 | 0x400     # ALLOWUNDO|NOCONFIRMATION|SILENT|NOERRORUI
+        code = ctypes.windll.shell32.SHFileOperationW(ctypes.byref(operation))
+        if code or operation.fAnyOperationsAborted:
+            result.errors.append(
+                f'回收站删除失败（错误码 0x{code & 0xFFFFFFFF:X}）：'
+                + '、'.join(path.name for path in targets))
+    else:
+        result.errors.append('回收站删除仅支持 Windows')
+    for path in targets:
+        if not path.exists():
+            result.paths.append(path)
     return result

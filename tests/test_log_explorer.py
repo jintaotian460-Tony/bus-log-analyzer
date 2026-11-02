@@ -1,6 +1,8 @@
+import sys
 from unittest.mock import Mock
 from pathlib import Path
 
+import pytest
 from PySide6.QtWidgets import QFileDialog, QMessageBox
 
 
@@ -449,5 +451,68 @@ def test_main_window_close_cancels_file_job_without_destroying_running_thread(qa
     finally:
         release.set()
         _wait_file_job(qapp, window.log_explorer)
+        window.close()
+        qapp.processEvents()
+
+
+@pytest.mark.skipif(sys.platform != 'win32', reason='Recycle Bin delete is Windows-only')
+def test_delete_moves_selection_to_the_recycle_bin(qapp, tmp_path, monkeypatch):
+    from gui.main_window import MainWindow
+
+    monkeypatch.setattr(QMessageBox, 'warning', Mock())
+    monkeypatch.setattr(QMessageBox, 'question',
+                        lambda *a, **k: QMessageBox.StandardButton.Yes)
+    root = tmp_path / 'logs'
+    package = root / 'case'
+    package.mkdir(parents=True)
+    doomed = package / 'Recorder.csv'
+    doomed.write_text('Timestamps [s],X\n0,10\n', encoding='utf-8')
+
+    window = MainWindow('Recycle delete test', 'test')
+    explorer = window.log_explorer
+    try:
+        explorer.set_root(str(root))
+        explorer._delete_selection([doomed, package])
+        result = _wait_file_job(qapp, explorer)
+        assert not result.errors
+        assert doomed not in result.paths or not doomed.exists()
+        assert not doomed.exists() and not package.exists()
+
+        # a cancelled confirmation must not start anything
+        monkeypatch.setattr(QMessageBox, 'question',
+                            lambda *a, **k: QMessageBox.StandardButton.No)
+        keeper = root / 'keep.csv'
+        keeper.write_text('x', encoding='utf-8')
+        explorer._delete_selection([keeper])
+        qapp.processEvents()
+        assert explorer._file_job is None and keeper.exists()
+    finally:
+        _stop_file_system_watch(explorer)
+        window.close()
+        qapp.processEvents()
+
+
+def test_delete_entry_is_offered_but_not_for_the_root(qapp, tmp_path, monkeypatch):
+    from gui.main_window import MainWindow
+
+    monkeypatch.setattr(QMessageBox, 'warning', Mock())
+    root = tmp_path / 'logs'
+    root.mkdir()
+    (root / 'a.csv').write_text('x', encoding='utf-8')
+
+    window = MainWindow('Delete menu test', 'test')
+    explorer = window.log_explorer
+    try:
+        explorer.set_root(str(root))
+        menu = explorer._context_menu(root / 'a.csv')
+        delete = next(a for a in menu.actions() if a.text().startswith('删除'))
+        assert delete.isEnabled()
+
+        # the log root itself is never a delete target
+        menu = explorer._context_menu(root)
+        delete = next(a for a in menu.actions() if a.text().startswith('删除'))
+        assert not delete.isEnabled()
+    finally:
+        _stop_file_system_watch(explorer)
         window.close()
         qapp.processEvents()

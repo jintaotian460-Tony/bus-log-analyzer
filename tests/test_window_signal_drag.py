@@ -69,7 +69,7 @@ def test_cross_window_drop_moves_all_selected_signals_once(panel, qapp, surface)
     first.color, first.line_style = '#123456', 'dotted'
     second.visible = False
     second.unavailable_reason = '本日志未匹配'
-    panel.set_line_width(.5)
+    panel.set_line_width(1)
     panel.redraw()
     panel.set_cursor1_enabled(True)
     panel.move_cursor1(3)
@@ -92,7 +92,7 @@ def test_cross_window_drop_moves_all_selected_signals_once(panel, qapp, surface)
     assert len(panel._undo_stack) == 1
     assert panel._driving_vb().viewRange()[0] == pytest.approx(before, abs=.03)
     assert panel.v_line.value() == 3
-    assert first.curve.opts['pen'].widthF() == .5
+    assert first.curve.opts['pen'].widthF() == 1
     panel.undo()
     settle(qapp)
     assert all(panel._items[key].window_id == 0 for key in keys)

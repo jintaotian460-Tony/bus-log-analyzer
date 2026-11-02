@@ -43,13 +43,13 @@ def test_explicit_width_survives_points_selection_and_rebuild(qapp, mode):
         panel.set_series_line_style(first.key, 'dash')
         panel.set_hide_lines(False)
         panel.redraw()
-        assert all(item.curve.opts['pen'].widthF() == 4 for item in panel._items.values())
+        assert all(item.curve.opts['pen'].widthF() == LINE_WIDTHS[-1] for item in panel._items.values())
         panel.set_show_points(True)
         panel.set_hide_lines(True)
-        panel.set_line_width(.5)
+        panel.set_line_width(1)
         assert panel._items[first.key].curve.opts['pen'].style() == Qt.PenStyle.NoPen
         panel.set_hide_lines(False)
-        assert panel._items[first.key].curve.opts['pen'].widthF() == .5
+        assert panel._items[first.key].curve.opts['pen'].widthF() == 1
         panel.set_line_width(None)
         panel._restore_selection([])
         assert panel._items[first.key].curve.opts['pen'].widthF() == panel._POINTS_LINE_WIDTH
@@ -68,9 +68,9 @@ def test_width_change_only_restyles_existing_buffers(qapp, monkeypatch):
         def unexpected(*args, **kwargs):
             pytest.fail('Changing line width must not reload the signal buffers')
         monkeypatch.setattr(item.curve, 'setData', unexpected)
-        panel.set_line_width(.5)
+        panel.set_line_width(1)
         assert item.curve.xData is before[0] and item.curve.yData is before[1]
-        assert item.curve.opts['pen'].widthF() == .5
+        assert item.curve.opts['pen'].widthF() == 1
     finally:
         panel.close()
 
@@ -91,21 +91,21 @@ def test_toolbar_overflow_configuration_and_template_keep_the_width(qapp, tmp_pa
         window.measurement_path = window.blf_path = 'current.csv'
         window._on_worker_finished(store)
         window.add_signal_to_plot(a.key)
-        action = next(action for action in window.line_width_actions if action.data() == .5)
+        action = next(action for action in window.line_width_actions if action.data() == 1)
         action.trigger()
-        assert window.plot_panel.line_width() == .5
-        assert window.btn_line_width.text() == '线宽 0.5 px'
+        assert window.plot_panel.line_width() == 1
+        assert window.btn_line_width.text() == '线宽 1 px'
         config = window._configuration_dict()
-        assert config['plot_line_width'] == .5
+        assert config['plot_line_width'] == 1
         template = analysis_templates.capture(window)
         window._set_line_width(4)
         assert analysis_templates.apply(window, template)
-        assert window.plot_panel.line_width() == .5
+        assert window.plot_panel.line_width() == 1
         window._set_line_width(3)
         window._apply_configuration(config, str(tmp_path/'session.json'))
-        assert window.plot_panel.line_width() == .5
+        assert window.plot_panel.line_width() == 1
         window._reset_for_new_measurement()
-        assert window.plot_panel.line_width() == .5
+        assert window.plot_panel.line_width() == 1
         row = window.plot_button_row
         row.resize(100, row.sizeHint().height())
         row._fit()
@@ -114,8 +114,8 @@ def test_toolbar_overflow_configuration_and_template_keep_the_width(qapp, tmp_pa
         submenu = next(action.menu() for action in row.more_menu.actions()
                        if action.text().startswith('线宽'))
         assert submenu is window.btn_line_width.menu()
-        next(action for action in submenu.actions() if action.data() == 1.5).trigger()
-        assert window.plot_panel.line_width() == 1.5
+        next(action for action in submenu.actions() if action.data() == 2).trigger()
+        assert window.plot_panel.line_width() == 2
         row._fill_menu()
         assert window.btn_line_width.menu().actions()
         invalid = deepcopy(template)

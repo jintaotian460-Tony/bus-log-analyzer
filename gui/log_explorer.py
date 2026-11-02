@@ -209,6 +209,13 @@ class LogExplorer(QWidget):
             extract_action = menu.addAction('解压 ZIP')
             extract_action.setEnabled(not busy)
             extract_action.triggered.connect(lambda: self._extract_zip(path))
+        menu.addSeparator()
+        delete_action = menu.addAction('删除（移入回收站）')
+        delete_action.setEnabled(not busy and bool(selected)
+                                 and (not self.root_path
+                                      or all(p != Path(self.root_path).resolve()
+                                             for p in selected)))
+        delete_action.triggered.connect(lambda: self._delete_selection(selected))
         return menu
 
     def _open_in_explorer(self, path):
@@ -258,6 +265,25 @@ class LogExplorer(QWidget):
 
     def _extract_zip(self, path):
         self._start_file_operation('解压', file_ops.extract, Path(path))
+
+    def _delete_selection(self, paths):
+        # Recycle Bin, never an erase: a mis-click on a production log is
+        # undoable. Windows additionally refuses the loaded measurement (the
+        # reader holds it open), which the operation reports as an error.
+        paths = [Path(path) for path in paths if Path(path).exists()]
+        if not paths:
+            return
+        names = '、'.join(path.name for path in paths[:5]) \
+                + ('…' if len(paths) > 5 else '')
+        answer = QMessageBox.question(
+            self, '删除',
+            f'把 {len(paths)} 项移入回收站？\n\n{names}\n\n'
+            '可从回收站恢复；正在加载的测量文件会被拒绝删除。',
+            QMessageBox.StandardButton.Yes | QMessageBox.StandardButton.No,
+            QMessageBox.StandardButton.No)
+        if answer != QMessageBox.StandardButton.Yes:
+            return
+        self._start_file_operation('删除', file_ops.delete, paths)
 
     def _start_file_operation(self, verb, operation, *args):
         if self._file_job is not None:

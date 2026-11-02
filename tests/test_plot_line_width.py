@@ -129,6 +129,11 @@ def test_toolbar_overflow_configuration_and_template_keep_the_width(qapp, tmp_pa
         invalid['presentation']['plot_line_width'] = float('nan')
         with pytest.raises(ValueError, match='line width'):
             normalise_template(invalid)
+        # widths saved on the old 0.5/1.5 steps load onto the nearest step:
+        # a whole template library was once rejected over this
+        legacy = deepcopy(template)
+        legacy['presentation']['plot_line_width'] = 0.5
+        assert normalise_template(legacy)
         config.pop('plot_line_width')
         window._apply_configuration(config, str(tmp_path/'old.json'))
         assert window.plot_panel.line_width() is None
@@ -140,6 +145,11 @@ def test_toolbar_overflow_configuration_and_template_keep_the_width(qapp, tmp_pa
 @pytest.mark.parametrize('value', [None, True, -1, 0, float('nan'), float('inf'), 'bad', [], {}])
 def test_invalid_width_falls_back_to_automatic(value):
     assert normalise_line_width(value) is None
+
+
+def test_legacy_saved_widths_load_onto_the_nearest_step():
+    assert normalise_line_width(.5) == 1.0
+    assert normalise_line_width(1.5) == 2.0
 
 
 def test_selecting_a_row_highlights_its_curve_at_every_width(qapp):

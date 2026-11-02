@@ -6,6 +6,12 @@
 LINE_WIDTHS = (1.0, 2.0, 3.0, 4.0, 5.0, 6.0, 8.0)
 
 
+# Widths saved before the integer steps existed; loaded onto the nearest
+# step so an old template or session keeps loading instead of being rejected
+# wholesale by template validation.
+_LEGACY_WIDTHS = {0.5: 1.0, 1.5: 2.0}
+
+
 def normalise_line_width(value):
     """None keeps the original automatic widths, including selection feedback."""
     if isinstance(value, bool):
@@ -14,7 +20,7 @@ def normalise_line_width(value):
         width = float(value)
     except (TypeError, ValueError, OverflowError):
         return None
-    return width if width in LINE_WIDTHS else None
+    return _LEGACY_WIDTHS.get(width) or (width if width in LINE_WIDTHS else None)
 
 
 def selected_line_width(width):

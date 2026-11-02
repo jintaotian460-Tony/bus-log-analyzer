@@ -206,3 +206,73 @@ def test_double_click_on_the_group_name_renames_it_in_a_dialog_only(
     assert {grouped._items[key].group for key in ('Speed', 'Temp')} == {'Drivetrain'}
     # No editor in the cell after the dialog: it would change nothing.
     assert grouped.table.state() != QAbstractItemView.State.EditingState
+
+
+# ── Space key ────────────────────────────────────────────────────────────
+
+
+def _press_space(panel, qapp) -> None:
+    QTest.keyClick(panel.table, Qt.Key.Key_Space)
+    qapp.processEvents()
+
+
+def test_space_ticks_and_unticks_the_current_signal(grouped, qapp):
+    grouped.table.setCurrentIndex(
+        grouped.table.model().index(grouped._row_lookup['Pressure'], 0))
+
+    _press_space(grouped, qapp)
+    assert not grouped._items['Pressure'].visible
+    assert _group_visible(grouped) == [True, True]
+
+    _press_space(grouped, qapp)
+    assert grouped._items['Pressure'].visible
+
+
+def test_space_on_a_group_header_hides_and_shows_the_whole_group(grouped, qapp):
+    grouped.table.setCurrentIndex(
+        grouped.table.model().index(_header_row(grouped), 0))
+
+    _press_space(grouped, qapp)
+    assert _group_visible(grouped) == [False, False]
+    assert grouped._items['Pressure'].visible  # outside the group, untouched
+
+    _press_space(grouped, qapp)
+    assert _group_visible(grouped) == [True, True]
+
+
+def test_space_applies_to_every_selected_signal_row(grouped, qapp):
+    # Whole rows, as SelectRows behavior makes the mouse select them:
+    # selected_keys() reads selectedRows(), which lists fully selected rows.
+    from PySide6.QtCore import QItemSelection, QItemSelectionModel
+    table = grouped.table
+    last_col = table.columnCount() - 1
+    # group rows shift plain row ids — go through the panel's row lookup
+    rows = [grouped._row_lookup[key] for key in ('Speed', 'Temp', 'Pressure')]
+    # setCurrentIndex first: its ClearAndSelect would wipe a selection made
+    # before it, leaving Space a single row to work on.
+    table.setCurrentIndex(table.model().index(rows[0], 0))
+    selection = QItemSelection()
+    for row in rows:
+        selection.select(table.model().index(row, 0),
+                         table.model().index(row, last_col))
+    # Select | Rows, the panel's own _restore_selection idiom
+    table.selectionModel().select(
+        selection,
+        QItemSelectionModel.SelectionFlag.Select
+        | QItemSelectionModel.SelectionFlag.Rows)
+
+    _press_space(grouped, qapp)
+
+    assert _group_visible(grouped) == [False, False]
+    assert not grouped._items['Pressure'].visible
+
+
+def test_space_without_a_current_row_changes_nothing(grouped, qapp):
+    from PySide6.QtCore import QModelIndex
+    grouped.table.clearSelection()
+    grouped.table.setCurrentIndex(QModelIndex())
+
+    _press_space(grouped, qapp)
+
+    assert _group_visible(grouped) == [True, True]
+    assert grouped._items['Pressure'].visible

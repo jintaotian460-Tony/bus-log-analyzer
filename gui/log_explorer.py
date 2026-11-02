@@ -10,6 +10,7 @@ from PySide6.QtWidgets import (
 )
 
 from core import log_file_operations as file_ops
+from gui import app_log
 
 
 class _FileJob(QThread):
@@ -115,7 +116,19 @@ class LogExplorer(QWidget):
             self.tree.setRootIndex(self.model.setRootPath(path))
 
     def choose_root(self):
-        path = QFileDialog.getExistingDirectory(self, 'Project log folder', self.root_path)
+        # Non-native on purpose. The Windows shell folder picker (a COM
+        # IFileOpenDialog) has hung the GUI thread for minutes on end, with
+        # nothing on screen: the call pumps messages internally, so even the
+        # crash log's freeze watchdog keeps seeing a beating event loop and
+        # records nothing (BLA_crash.log 2026-11-02, RPC_E_WRONG_THREAD
+        # storm under choose_root). Qt's own dialog uses no COM. The two
+        # app-log lines leave a timestamped record should any dialog ever
+        # hang again: an "opened" with no "returned" is the stuck call.
+        app_log.record('Log folder chooser opened.')
+        path = QFileDialog.getExistingDirectory(
+            self, 'Project log folder', self.root_path,
+            options=QFileDialog.Option.DontUseNativeDialog)
+        app_log.record(f'Log folder chooser returned: {path if path else "cancelled"}')
         if path:
             self.set_root(path)
             self.rootChanged.emit(self.root_path)

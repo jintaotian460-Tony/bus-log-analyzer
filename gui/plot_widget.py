@@ -658,6 +658,32 @@ class _ReorderTable(QTableWidget):
             # click on a box leaves the selection as it was.
             panel._restore_selection(keep)
 
+    def keyPressEvent(self, event) -> None:  # type: ignore[override]
+        """Space ticks or unticks the current row's box.
+
+        The arrow keys already move the current cell, so with this the
+        keyboard alone can show and hide signals — and whole groups, whose
+        box lives in the same column. Everything downstream (multi-row
+        application, group children) comes from the same itemChanged path
+        a mouse click on the box takes.
+        """
+        if (event.key() == Qt.Key.Key_Space
+                and event.modifiers() == Qt.KeyboardModifier.NoModifier):
+            index = self.currentIndex()
+            box = self.item(index.row(), 0) if index.isValid() else None
+            # In multi-axis mode the current cell may be the row's axis box.
+            if (index.isValid() and index.column() == 6
+                    and self._panel is not None and self._panel._multi_axis):
+                box = self.item(index.row(), 6) or box
+            if (box is not None
+                    and box.flags() & Qt.ItemFlag.ItemIsUserCheckable):
+                box.setCheckState(
+                    Qt.CheckState.Unchecked
+                    if box.checkState() == Qt.CheckState.Checked
+                    else Qt.CheckState.Checked)
+                return
+        super().keyPressEvent(event)
+
     def mouseDoubleClickEvent(self, event) -> None:  # type: ignore[override]
         """A quick second click on a box or a group's arrow is a click.
 
@@ -2862,11 +2888,16 @@ class PlotPanel(QWidget):
             vs = np.asarray(plotted.series.values,     dtype=np.float64)
             connect, all_finite = _curve_connection(ts, vs, self._curve_connect_mask)
             if self._gap_timeout > 0:
-                connect = self._curve_connect_mask(ts, vs)
+                # 'all' (a clean monotonic signal) has no mask yet; a signal
+                # that _curve_connection masked already breaks where it must,
+                # so only the expiry breaks are AND-ed in — not a second full
+                # mask build over the whole signal.
+                if not isinstance(connect, np.ndarray):
+                    connect = np.ones(ts.size, dtype=np.bool_)
                 for start in range(0, len(ts) - 1, _RANGE_CHUNK):
                     stop = min(len(ts) - 1, start + _RANGE_CHUNK)
                     connect[start:stop] &= (ts[start + 1:stop + 1] - ts[start:stop]
-                                           <= self._gap_timeout)
+                                            <= self._gap_timeout)
             _note_finite(plotted.curve, ts, all_finite or _all_finite(ts), all_finite)
             plotted.curve.setData(ts, vs, pen=pen, connect=connect,
                                   skipFiniteCheck=all_finite)
@@ -3250,7 +3281,11 @@ class PlotPanel(QWidget):
         self._gap_timeout = timeout
         for plotted in self._items.values():
             self._apply_curve_style(plotted)
-        self._draw_data_gaps()
+        # No separate _draw_data_gaps() here: _refresh_table(), reached
+        # through _refresh_table_and_cursors(), redraws the gap regions.
+        # Calling both walked every plotted signal's samples twice — on a
+        # multi-million-sample measurement that alone froze the GUI past
+        # the crash log's 20 s timeout.
         self._refresh_table_and_cursors()
 
     def freshness_summary(self, position: float):
@@ -3302,15 +3337,32 @@ class PlotPanel(QWidget):
                     seen.add(id(ts))
                     gaps.extend(data_gaps(ts, self._gap_timeout))
                 values = np.asarray(plotted.series.values)
-                invalid = []
+                # Chunk-relative indices need +start to become absolute ones;
+                # taken as-is beyond the first chunk they pointed gaps at
+                # wrong samples (unreachable until a series passed 1 MiB).
+                parts = []
                 for start in range(0, len(values), _RANGE_CHUNK):
                     stop = min(len(values), start + _RANGE_CHUNK)
-                    missing = np.flatnonzero(~np.isfinite(values[start:stop]))
-                    invalid.extend((int(index) for index in missing))
-                invalid = [index for index in invalid
-                           if self._sample_missing(plotted.series, index)]
-                if invalid:
-                    invalid = np.asarray(invalid, dtype=np.int64)
+                    nonfinite = np.flatnonzero(~np.isfinite(values[start:stop]))
+                    if nonfinite.size:
+                        parts.append(nonfinite + start)
+                # Label-bearing channels (DBC enums, MDF text) display strings,
+                # so their NaN numeric values are not missing samples. One pass
+                # over the non-finite indices only, instead of
+                # _sample_missing() per NaN sample — a scalar isfinite() plus
+                # two method calls each froze the GUI for tens of seconds on
+                # label channels with millions of samples.
+                raw = (plotted.series.raw_values
+                       if plotted.series.has_labels else None)
+                if raw is None:
+                    invalid = (np.concatenate(parts) if parts
+                               else np.empty(0, dtype=np.int64))
+                else:
+                    invalid = np.asarray(
+                        [index for part in parts for index in part
+                         if not (index < len(raw) and isinstance(raw[index], str))],
+                        dtype=np.int64)
+                if invalid.size:
                     starts = invalid[np.r_[True, np.diff(invalid) > 1]]
                     ends = invalid[np.r_[np.diff(invalid) > 1, True]]
                     gaps.extend((float(ts[a]), float(ts[b+1] if b+1 < len(ts) else ts[-1])) for a,b in zip(starts,ends) if b+1 < len(ts) or ts[a] < ts[-1])

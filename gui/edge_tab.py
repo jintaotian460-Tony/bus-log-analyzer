@@ -107,13 +107,30 @@ class EdgeTab(QWidget):
 
     def paintEvent(self, event):
         palette = self.palette()
-        color = palette.color(QPalette.ColorRole.Highlight if self.underMouse() or self._dragging
-                              else QPalette.ColorRole.Mid)
+        active = self.underMouse() or self._dragging
+        # Midlight, not Mid: against a dark plot background a Mid line was
+        # one invisible pixel, and a divider nobody sees is a feature nobody
+        # finds — however well it works once found.
+        color = palette.color(QPalette.ColorRole.Highlight if active
+                              else QPalette.ColorRole.Midlight)
         painter = QPainter(self)
-        painter.setPen(QPen(QColor(color), 1))
+        painter.setPen(QPen(QColor(color), 2 if active else 1))
         if self._orientation == Qt.Orientation.Horizontal:
             y = round(self._line_offset if self._line_offset is not None else self.height() // 2)
             painter.drawLine(0, y, self.width()-1, y)
+            # Three dashes at the centre: the classic drag-handle shape that
+            # says "this divider moves" without any chrome around it.
+            painter.setPen(QPen(QColor(color), 3))
+            centre = self.width() // 2
+            for start, stop in ((centre-26, centre-18), (centre-4, centre+4),
+                                (centre+18, centre+26)):
+                painter.drawLine(start, y, stop, y)
         else:
             x = round(self._line_offset if self._line_offset is not None else self.width() // 2)
             painter.drawLine(x, 0, x, self.height()-1)
+            painter.setPen(QPen(QColor(color), 3))
+            centre = self.height() // 2
+            for start, stop in ((centre-26, centre-18), (centre-4, centre+4),
+                                (centre+18, centre+26)):
+                painter.drawLine(x, start, x, stop)
+

@@ -1,5 +1,6 @@
 import numpy as np
 import pytest
+from PySide6.QtCore import QPointF
 
 from core.signal_store import SignalSeries
 from gui.plot_widget import PlotPanel
@@ -393,3 +394,24 @@ def test_bottom_alignment_survives_reorder_close_undo_and_table_view(windows, qa
     panel.set_table_view(False)
     settle(qapp)
     assert_tiles(panel)
+
+
+def test_window_dividers_are_visible_full_width_drag_targets(windows, qapp):
+    """The height grips exist to be found: shown at each boundary, spanning
+    the viewport, cursor and tooltip saying what they do."""
+    panel = windows
+    a, b = series('A'), series('B')
+    panel.add_series(a.key, a)
+    panel.new_window()
+    panel.add_series(b.key, b)
+    qapp.processEvents()
+
+    assert len(panel._window_grips) == len(panel._stacked_plots) - 1
+    viewport = panel.glw.viewport()
+    for index, grip in enumerate(panel._window_grips):
+        assert grip.isVisible()
+        assert grip.width() == viewport.width()
+        bottom = panel._stacked_plots[index].geometry().bottom()
+        expected = panel.glw.mapFromScene(QPointF(0, bottom)).y()
+        assert grip.y() == pytest.approx(expected - grip.THICKNESS // 2, abs=1)
+        assert '高度' in grip.toolTip()

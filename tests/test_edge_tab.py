@@ -34,12 +34,14 @@ def drag(widget, dx=0, dy=0):
 
 @pytest.mark.parametrize('background', ['#f3f3f3', '#202020'])
 @pytest.mark.parametrize('orientation', [Qt.Orientation.Horizontal, Qt.Orientation.Vertical])
-def test_line_is_one_pixel_and_mouse_target_is_transparent(qapp, background, orientation):
+def test_line_grip_dashes_and_nothing_else(qapp, background, orientation):
+    """The divider paints one line, three centre grip dashes on the rows
+    either side of it, and nothing else: the mouse target stays see-through."""
     parent = QWidget()
     parent.resize(180, 180)
     palette = parent.palette()
     palette.setColor(QPalette.ColorRole.Window, QColor(background))
-    palette.setColor(QPalette.ColorRole.Mid, QColor('#8899aa'))
+    palette.setColor(QPalette.ColorRole.Midlight, QColor('#8899aa'))
     parent.setPalette(palette)
     parent.setAutoFillBackground(True)
     tab = EdgeTab(orientation, parent)
@@ -48,11 +50,22 @@ def test_line_is_one_pixel_and_mouse_target_is_transparent(qapp, background, ori
     settle(qapp)
     image = parent.grab().toImage()
     if orientation == Qt.Orientation.Horizontal:
-        pixels = [image.pixelColor(30, 20+i).name() for i in range(tab.height())]
+        line = 20 + tab.height() // 2
+        across = [image.pixelColor(30, 20+i).name() for i in range(tab.height())]
+        along = [image.pixelColor(20+i, line).name() for i in range(tab.width())]
+        beside = [image.pixelColor(20+i, line-1).name() for i in range(tab.width())]
     else:
-        pixels = [image.pixelColor(20+i, 30).name() for i in range(tab.width())]
-    assert pixels.count(background) == EdgeTab.THICKNESS-1
-    assert pixels.count('#8899aa') == 1
+        line = 20 + tab.width() // 2
+        across = [image.pixelColor(20+i, 30).name() for i in range(tab.width())]
+        along = [image.pixelColor(line, 20+i).name() for i in range(tab.height())]
+        beside = [image.pixelColor(line-1, 20+i).name() for i in range(tab.height())]
+    # away from the dashes: the line alone, one pixel wide
+    assert across.count(background) == EdgeTab.THICKNESS-1
+    assert across.count('#8899aa') == 1
+    # along the line it runs the whole way; the row beside it holds only
+    # the three 8-px grip dashes
+    assert along.count('#8899aa') == len(along)
+    assert beside.count('#8899aa') == 24
     parent.close()
 
 

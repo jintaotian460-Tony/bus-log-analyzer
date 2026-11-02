@@ -120,7 +120,9 @@ class EdgeTab(QWidget):
             painter.drawLine(0, y, self.width()-1, y)
             # Three dashes at the centre: the classic drag-handle shape that
             # says "this divider moves" without any chrome around it.
-            painter.setPen(QPen(QColor(color), 3))
+            grip_pen = QPen(QColor(color), 3)
+            grip_pen.setCapStyle(Qt.PenCapStyle.FlatCap)   # exactly 8-px dashes
+            painter.setPen(grip_pen)
             centre = self.width() // 2
             for start, stop in ((centre-26, centre-18), (centre-4, centre+4),
                                 (centre+18, centre+26)):
@@ -128,7 +130,9 @@ class EdgeTab(QWidget):
         else:
             x = round(self._line_offset if self._line_offset is not None else self.width() // 2)
             painter.drawLine(x, 0, x, self.height()-1)
-            painter.setPen(QPen(QColor(color), 3))
+            grip_pen = QPen(QColor(color), 3)
+            grip_pen.setCapStyle(Qt.PenCapStyle.FlatCap)   # exactly 8-px dashes
+            painter.setPen(grip_pen)
             centre = self.height() // 2
             for start, stop in ((centre-26, centre-18), (centre-4, centre+4),
                                 (centre+18, centre+26)):

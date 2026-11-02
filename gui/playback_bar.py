@@ -1,4 +1,4 @@
-"""Playback controls shared by the plot, its cursor readouts and the Trace."""
+"""Recording status shared by the plot, its cursor readouts and the Trace."""
 from __future__ import annotations
 
 import math
@@ -16,8 +16,9 @@ class PlaybackBar(QWidget):
     positionChanged = Signal(float)
     gapTimeoutChanged = Signal(float)
 
-    def __init__(self, parent=None):
+    def __init__(self, parent=None, *, transport_controls=True):
         super().__init__(parent)
+        self.transport_controls = bool(transport_controls)
         self.clock = PlaybackClock()
         self.epoch = None
         self._updating = False
@@ -28,7 +29,7 @@ class PlaybackBar(QWidget):
         self.timer.timeout.connect(self._tick)
 
         self.play_button = QPushButton('Play')
-        self.project_label = QLabel('Playback')
+        self.project_label = QLabel('离线观察')
         self.project_label.setMaximumWidth(180)
         self.project_label.setMinimumWidth(1)
         self.restart_button = QPushButton('Restart')
@@ -46,12 +47,18 @@ class PlaybackBar(QWidget):
         self.position.setKeyboardTracking(False)
         self.position.setToolTip('Playback position in seconds; Enter to seek')
         self.follow = QCheckBox('Follow view')
-        self.follow.setChecked(True)
+        self.follow.setChecked(self.transport_controls)
 
-        row = QHBoxLayout()
-        for widget in (self.project_label, self.play_button, self.restart_button, self.speed, self.slider,
+        # Keep the reusable clock/controller compatible with old configurations.
+        # The observation interface exposes only the status row and cursor input.
+        self.transport = QWidget(self)
+        row = QHBoxLayout(self.transport)
+        row.setContentsMargins(0, 0, 0, 0)
+        for widget in (self.play_button, self.restart_button, self.speed, self.slider,
                        self.position, self.follow):
             row.addWidget(widget, 1 if widget is self.slider else 0)
+        self.transport.setVisible(self.transport_controls)
+        self.transport.setEnabled(self.transport_controls)
         self.time_mode = QComboBox()
         self.time_mode.addItem('BLF UTC → local', 'utc')
         self.time_mode.addItem('Cloud local wall time', 'wall')
@@ -76,6 +83,8 @@ class PlaybackBar(QWidget):
         self.gap_label.setMinimumWidth(1)
         self.gap_label.setToolTip('Freshness is checked separately for each visible signal.')
         details = QHBoxLayout()
+        details.setSpacing(8)
+        details.addWidget(self.project_label)
         details.addWidget(self.time_mode)
         details.addWidget(self.time_label)
         details.addStretch(1)
@@ -83,8 +92,9 @@ class PlaybackBar(QWidget):
         details.addWidget(self.gap_timeout)
         details.addWidget(self.gap_label, 1)
         layout = QVBoxLayout(self)
-        layout.setContentsMargins(0, 4, 0, 4)
-        layout.addLayout(row)
+        layout.setContentsMargins(0, 2, 0, 2)
+        layout.setSpacing(0)
+        layout.addWidget(self.transport)
         layout.addLayout(details)
 
         self.play_button.clicked.connect(self.toggle)
@@ -109,6 +119,7 @@ class PlaybackBar(QWidget):
             self._updating = False
         self.setEnabled(False)
         self.time_label.setText('No decoded measurement')
+        self.time_mode.setVisible(self.transport_controls)
 
     def load(self, bounds, epoch=None, telemetry=False, *, keep_preferences=False):
         self.pause(publish=False)
@@ -124,6 +135,7 @@ class PlaybackBar(QWidget):
         finally:
             self._updating = False
         self.time_mode.setEnabled(epoch is not None)
+        self.time_mode.setVisible(self.transport_controls or epoch is not None)
         self.setEnabled(True)
         self.play_button.setEnabled(end > start)
         recording_mode = getattr(self, '_recording_mode', None)
@@ -145,6 +157,8 @@ class PlaybackBar(QWidget):
             self._publish()
 
     def toggle(self):
+        if not self.transport_controls:
+            return
         if self.clock.playing:
             self.pause()
         else:
@@ -236,5 +250,5 @@ class PlaybackBar(QWidget):
         except (TypeError, ValueError):
             self.gap_timeout.setValue(0)
             self._pending_position = 0
-        self.follow.setChecked(bool(config.get('follow_view', True)))
+        self.follow.setChecked(self.transport_controls and bool(config.get('follow_view', True)))
         self._configured = True

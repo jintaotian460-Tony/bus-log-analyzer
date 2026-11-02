@@ -71,12 +71,13 @@ def test_ten_ms_zoom_shows_only_original_samples_in_every_layout(qapp, mode):
     qapp.processEvents()
 
 
-def test_samples_are_visible_by_default_and_ten_ms_has_a_named_control(qapp):
+def test_samples_are_visible_by_default_without_a_fixed_time_tick_button(qapp):
     window = MainWindow('Time details', 'test')
     assert window.btn_points.isChecked()
     assert window.plot_panel._show_points
     assert window.btn_points.text() == '采样点'
-    assert window.btn_time_10ms.text() == '10 ms'
+    assert not hasattr(window, 'btn_time_10ms')
+    assert all(button.text() != '10 ms' for button in window.plot_button_row._buttons)
     window.close()
     qapp.processEvents()
 

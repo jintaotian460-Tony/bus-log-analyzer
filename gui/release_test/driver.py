@@ -372,7 +372,7 @@ class ScenarioDriver(QObject):
         record['outcome'] = 'plotted'
 
     def _playback(self, record: dict):
-        """Exercise the packaged timer, cursor readouts and a real data gap."""
+        """Keep legacy scenario names, exercising cursor-led offline inspection."""
         from core.playback import data_gaps
         window = self._window
         if window.store is None:
@@ -384,21 +384,23 @@ class ScenarioDriver(QObject):
         window.add_signals_to_plot([can_key, lin_key])
         window.playback.apply_config(dict(window.playback.to_config(), gap_timeout=2))
         start = window.playback.clock.start + 1
-        window.playback.seek(start)
+        window.btn_cursor1.setChecked(True)
+        window.plot_panel.move_cursor1(start)
         window.playback.toggle()
         yield from self._wait(0.4)
-        window.playback.pause()
-        record['timer_advanced'] = window.playback.clock.position > start + 0.15
+        assert not window.playback.clock.playing and not window.playback.timer.isActive()
+        assert window.playback.clock.position == start
+        record['cursor_driven'] = True
         record['cursor_synchronised'] = abs(window.plot_panel.v_line.value()-window.playback.clock.position) < 1e-6
         record['time_mode'] = window.playback.time_mode.currentData() if hasattr(window.playback, 'time_mode') else window.playback.to_config()['time_mode']
         series = window.store.get_series(lin_key)
         gaps = data_gaps(series.timestamps, window.playback.to_config()['gap_timeout'])
         if gaps:
             gap = max(gaps, key=lambda interval: interval[1]-interval[0])
-            window.playback.seek(sum(gap)/2)
+            window.plot_panel.move_cursor1(sum(gap)/2)
             row = window.plot_panel._row_lookup[lin_key]
             record['gap_readout'] = window.plot_panel.table.item(row, 2).text().startswith('Stale')
-        record['outcome'] = 'played'
+        record['outcome'] = 'observed'
 
     def _panels(self, record: dict):
         window = self._window
@@ -543,6 +545,11 @@ class ScenarioDriver(QObject):
         panel.move_cursor1(35.01)
         panel.move_cursor2(140.01)
         yield from self._wait(.4)
+        assert window.playback.transport.isHidden()
+        assert not window.playback.play_button.isVisibleTo(window)
+        assert not window.playback.follow.isVisibleTo(window)
+        assert not hasattr(window, 'btn_time_10ms')
+        assert window.playback.height() <= window.playback.gap_timeout.sizeHint().height()+8
         original = {key: item.series for key, item in panel._items.items()}
         for _widget, tree, _title in panel._window_widgets.values():
             assert not tree.isColumnHidden(1) and not tree.isColumnHidden(2)
@@ -588,6 +595,7 @@ class ScenarioDriver(QObject):
         yield from self._wait(.2)
         assert all(panel._items[key].series is value for key, value in original.items())
         record.update(outcome='passed', signals=len(original), local_legends=True,
+                      compact_header=True, transport_controls_removed=True, fixed_tick_button_removed=True,
                       cursor_handle_drag=True, cursor_values=True, visibility_toggle=True,
                       independent_axes=True, background_switch=True, original_data=True,
                       screenshot=screenshot, independent_screenshot=independent, light_screenshot=light)
@@ -891,7 +899,7 @@ class ScenarioDriver(QObject):
             yield from self._wait(.2)
             panel._update_adaptive_points()
             dense_label = '稀疏显示' in panel.sampling_label.text()
-            QTest.mouseClick(window.btn_time_10ms, Qt.MouseButton.LeftButton)
+            self._zoom_ruler_to_sample_detail()
             yield from self._wait(.3)
             panel._update_adaptive_points()
             low, high = panel._driving_vb().viewRange()[0]
@@ -1115,7 +1123,10 @@ class ScenarioDriver(QObject):
             rectangles = [plot.geometry() for plot in panel._stacked_plots]
             assert abs(rectangles[0].top()) < 1
             assert all(abs(a.bottom()-b.top()) < .01 for a, b in zip(rectangles, rectangles[1:]))
-            assert abs(rectangles[-1].bottom()+plot_windows.RULER_HEIGHT-panel.glw.viewport().height()) <= 1
+            assert abs(rectangles[-1].bottom()+plot_windows.RULER_HEIGHT-panel.glw.viewport().height()) <= 1, {
+                'graph_bottom': rectangles[-1].bottom(), 'ruler': plot_windows.RULER_HEIGHT,
+                'viewport_height': panel.glw.viewport().height(),
+                'heights': list(panel._window_heights), 'bottom_dock_height': window.bottom_dock.height()}
             footer = panel._cursor_line.mapToGlobal(QPoint())
             assert panel.window_ruler.mapToGlobal(QPoint(0, panel.window_ruler.height())).y() == footer.y()
             tree = panel._window_widgets[panel._window_specs[-1]['id']][1]
@@ -1156,11 +1167,12 @@ class ScenarioDriver(QObject):
             QTest.mouseClick(tab, Qt.MouseButton.LeftButton)
             assert dock.isVisible()
             QTest.mouseDClick(tab, Qt.MouseButton.LeftButton)
-            yield from self._wait(.2)
+            # QMainWindow animates dock visibility; assert the settled geometry.
+            yield from self._wait(SETTLE_SECONDS)
             assert not dock.isVisible() and tab.isVisible()
             tiled()
             QTest.mouseDClick(tab, Qt.MouseButton.LeftButton)
-            yield from self._wait(.2)
+            yield from self._wait(SETTLE_SECONDS)
             assert dock.isVisible()
             tiled()
         central = window.centralWidget().geometry()
@@ -1294,8 +1306,29 @@ class ScenarioDriver(QObject):
             screenshots[str(width)] = path
         window._set_line_width(None)
         yield from self._window_signal_drag(record)
+        self._zoom_ruler_to_sample_detail()
+        record['ruler_wheel_detail'] = True
         record.update(outcome='passed', line_width_menu=True, exact_selected_width=True,
                       original_buffers=True, ruler_left_drag=True, screenshots=screenshots)
+
+    def _zoom_ruler_to_sample_detail(self):
+        from PySide6.QtCore import Qt, QPoint, QPointF
+        from PySide6.QtGui import QWheelEvent
+        panel = self._window.plot_panel
+        ruler = panel.window_ruler
+        point = QPointF(ruler.rect().center())
+        for _ in range(80):
+            view = panel._driving_vb()
+            low, high = view.viewRange()[0]
+            levels = panel._stacked_plots[0].getAxis('bottom').tickValues(low, high, view.width())
+            if levels[1][0] <= .01:
+                return
+            QApplication.sendEvent(ruler, QWheelEvent(point,
+                QPointF(ruler.mapToGlobal(point.toPoint())), QPoint(), QPoint(0, 120),
+                Qt.MouseButton.NoButton, Qt.KeyboardModifier.NoModifier,
+                Qt.ScrollPhase.NoScrollPhase, False))
+            QApplication.processEvents()
+        raise AssertionError('Ruler wheel did not reach 10 ms sample detail')
 
     def _window_signal_drag(self, record):
         from PySide6.QtCore import Qt, QPointF, QMimeData

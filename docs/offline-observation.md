@@ -14,6 +14,9 @@ application panels retain their existing behavior.
 - Dotted green grid lines are independent of the text color, on dark and light plots.
 - The shared bottom ruler supports left-drag time panning and wheel zoom. The top
   cursor handles move the linked cursors across all windows.
+- The header is a single recording-status row. Playback transport controls and
+  their Follow view option are absent; the fixed 10 ms toolbar shortcut is removed.
+  The ruler still resolves 10 ms and finer intervals when zoomed with the wheel.
 - Original sample points, configurable line width, window-to-window signal dragging,
   templates and exact-name inheritance retain their existing behavior.
 

@@ -141,7 +141,7 @@ def test_playback_settings_roundtrip_and_reload_resets_to_saved_position(qapp):
     bar.close()
 
 
-def test_window_connects_player_values_cursor_and_configuration(qapp, monkeypatch, tmp_path):
+def test_observation_header_tracks_cursors_without_transport_controls(qapp, monkeypatch, tmp_path):
     from gui.main_window import MainWindow
     monkeypatch.setenv('OSVANTA_DATA_DIR', str(tmp_path))
     window = MainWindow('Playback test', 'test')
@@ -152,6 +152,12 @@ def test_window_connects_player_values_cursor_and_configuration(qapp, monkeypatc
     window.plot_panel.add_series('temp', store.get_series('temp'))
     window.playback.apply_config({'gap_timeout': 2})
     window._prepare_playback()
+    window.show()
+    qapp.processEvents()
+    assert window.playback.transport.isHidden()
+    assert not window.playback.play_button.isEnabled()
+    assert not window.playback.follow.isVisible()
+    assert window.playback.time_mode.isVisible()
     window.playback.time_mode.setCurrentIndex(1)
     window.playback.seek(9)
     assert window.btn_cursor1.isChecked()
@@ -162,11 +168,17 @@ def test_window_connects_player_values_cursor_and_configuration(qapp, monkeypatc
     now = [0.0]
     window.playback.clock.now = lambda: now[0]
     window.playback.toggle()
-    now[0] = 0.105
-    window.playback._tick()
-    now[0] = 0.110
-    window.playback.pause()
-    assert window.plot_panel.v_line.value() == window.playback.clock.position == 9.110
+    now[0] = 1
+    assert not window.playback.clock.playing and not window.playback.timer.isActive()
+    window.plot_panel.move_cursor1(10)
+    assert window.playback.clock.position == 10
+    assert cell(window.plot_panel) == '30.000'
+    assert '2026-10-29 13:00:10.180' in window.playback.time_label.text()
+    window.playback.apply_config({'follow_view': True, 'speed': 5, 'position': 3})
+    assert not window.playback.follow.isChecked()
+    window._prepare_playback()
+    assert window.playback.clock.position == 3
+    assert window.playback.transport.isHidden()
     window._release_store()
     assert not window.playback.timer.isActive()
     window.close()

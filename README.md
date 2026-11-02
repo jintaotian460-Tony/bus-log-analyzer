@@ -58,14 +58,13 @@ MDF and CSV content is detected automatically. Database Manager supports per-cha
 - JSON configuration save/load for measurement paths, database mapping, calculated signals, plotted order, groups, colors, visibility, axes, cursors, markers, and display settings.
 - YAML rule-based diagnostics for expressions, ranges, fault flags, and message loss; optional GitHub Models analysis is available through `Ctrl+Shift+A`.
 
-### Offline telemetry playback
+### Offline telemetry observation
 
-After decoding, use **Play / Pause**, **Restart**, the speed selector, and the
-position slider or seconds field above the plot. Cursor 1, its value columns,
-the Table and an open Trace follow the playback position. **Follow view** scrolls
-the plot without changing its Y scale. Clicking or dragging a cursor pauses
-playback at that position. The clock advances by elapsed time, including when
-the GUI briefly stalls. Reaching the end pauses; Play starts again from the start.
+After decoding, click or drag Cursor 1 to inspect a recording. Its value columns,
+the Table and an open Trace follow that position. Drag the bottom ruler to pan
+the shared timeline or use the wheel to zoom down to 10 ms and finer intervals.
+The top area contains one status row with the project, recording time and gap
+information. Playback transport controls and the fixed 10 ms shortcut are removed.
 
 **Stale after** marks each plotted signal separately when it has had no update
 for longer than the selected timeout. Longer gaps have amber shading and broken
@@ -75,13 +74,14 @@ gap marking. Raw measurements and exported samples are unchanged. The supplied
 E702 project selects a 2-second timeout; recordings without a configured default
 start with gap marking off. Configure the DBC that matches the recorded layout.
 
-The playback bar displays absolute time when the source has an epoch time base.
+The recording-status row displays absolute time when the source has an epoch time base.
 **BLF UTC → local** is the standard interpretation. Some cloud CSV-to-BLF
 converters write local clock fields into the BLF header: select **Cloud local
 wall time** for these files to retain the original clock time, avoiding a second
 timezone conversion. This is an explicit display setting, not a change to every
-BLF or to relative timestamps. Time mode, speed, timeout, position and Follow
-view are saved with the configuration; playback always reopens paused.
+BLF or to relative timestamps. Time mode, timeout and cursor position are saved
+with the configuration. Old playback settings remain readable; they do not start
+a timer or restore transport controls in the observation interface.
 
 Open a saved playback session directly with `BusLogAnalyzer.exe --config session.json`.
 This feature replays measurements on screen; it does not transmit on a CAN bus.

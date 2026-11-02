@@ -247,7 +247,7 @@ def test_plot_modes_come_first_then_a_gap_then_the_icon_buttons_then_clear_plot(
 
     clear = window.btn_clear_plot
 
-    assert row._buttons == modes + icons + [window.btn_points, window.btn_hide_line, window.btn_line_width, window.btn_time_10ms, clear]
+    assert row._buttons == modes + icons + [window.btn_points, window.btn_hide_line, window.btn_line_width, clear]
     assert [b.text() for b in modes] == ['＋窗口', '分析模板', 'Table']
     assert [b.accessibleName() for b in icons + [window.btn_hide_line, clear]] == [
         'Fit to Window', 'Fit Vertical', 'Rectangle Zoom', 'Cursor 1', 'Cursor 2',
@@ -260,9 +260,9 @@ def test_plot_modes_come_first_then_a_gap_then_the_icon_buttons_then_clear_plot(
     table, fit = window.btn_table, window.btn_fit
     assert fit.x() - (table.x() + table.width()) > 2 * row.SPACING
     # Clear Plot, which empties the plot, stands apart from the view buttons.
-    time_ticks = window.btn_time_10ms
+    last_tool = window.btn_line_width
     assert not row.overflowed_buttons()
-    assert clear.x() - (time_ticks.x() + time_ticks.width()) > 2 * row.SPACING
+    assert clear.x() - (last_tool.x() + last_tool.width()) > 2 * row.SPACING
 
 
 def test_plot_buttons_are_level_with_the_table_header(window, qapp):

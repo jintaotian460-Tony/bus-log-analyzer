@@ -393,7 +393,7 @@ class MainWindow(QMainWindow):
         self.log_explorer.rootChanged.connect(self._log_root_changed)
         self.signal_tree = SignalTreeWidget()
         self.plot_panel = PlotPanel()
-        self.playback = PlaybackBar(self)
+        self.playback = PlaybackBar(self, transport_controls=False)
         self.playback.setStyleSheet(CONTROLS)
         self.playback.positionChanged.connect(self._playback_position)
         self.playback.gapTimeoutChanged.connect(self._playback_gap_changed)
@@ -501,10 +501,6 @@ class MainWindow(QMainWindow):
             action.triggered.connect(lambda _checked=False, value=width: self._set_line_width(value))
             self.line_width_actions.append(action)
         self._set_line_width(None)
-        self.btn_time_10ms = QPushButton('10 ms')
-        self.btn_time_10ms.setAccessibleName('10 ms time ticks')
-        self.btn_time_10ms.setToolTip('放大当前游标或视图中心，底部小刻度为 10 ms。仅改变视图，不重采样；Fit 恢复全程。')
-        self.btn_time_10ms.clicked.connect(lambda: self.plot_panel.zoom_to_time_ticks(.01))
         self.btn_hide_line = icon_button('hide_line', 'Hide Line',
                                          'Hide Line: the data points only, once they are shown')
         self.btn_hide_line.setCheckable(True)
@@ -522,7 +518,7 @@ class MainWindow(QMainWindow):
         self.plot_button_row.add_gap(18)
         for btn in (self.btn_fit, self.btn_fit_v, self.btn_zoom_rect, self.btn_cursor1,
                     self.btn_cursor2, self.btn_line_mode, self.btn_points,
-                    self.btn_hide_line, self.btn_line_width, self.btn_time_10ms, None,
+                    self.btn_hide_line, self.btn_line_width, None,
                     self.btn_clear_plot):
             if btn is None:
                 self.plot_button_row.add_gap(18)
@@ -2330,7 +2326,7 @@ class MainWindow(QMainWindow):
 
     def _update_project_label(self) -> None:
         self.log_explorer.set_root(self.project.get('log_root', ''))
-        name = self.project.get('name') or 'Playback'
+        name = self.project.get('name') or '离线观察'
         self.playback.project_label.setText(name)
         self.playback.project_label.setToolTip(f'Active project: {name}')
 

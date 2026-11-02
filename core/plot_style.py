@@ -15,3 +15,13 @@ def normalise_line_width(value):
     except (TypeError, ValueError, OverflowError):
         return None
     return width if width in LINE_WIDTHS else None
+
+
+def selected_line_width(width):
+    """Thicker pen for a selected curve, so selection shows at any width.
+
+    Automatic mode does the same with its own pair (2.8 px unselected,
+    5 px selected); this brings the same visibility to an explicit width,
+    where an exact-width curve would otherwise not change at all.
+    """
+    return width + max(1.0, 0.8 * width)

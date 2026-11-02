@@ -1242,6 +1242,10 @@ class ScenarioDriver(QObject):
         window.resize(1700, 950)
         yield from self._wait(.2)
         buffers = {key: (item.curve.xData, item.curve.yData) for key, item in panel._items.items()}
+        # A selected curve thickens (selection highlight); exact widths are
+        # asserted per menu entry, so start from no selection.
+        panel._restore_selection([])
+        yield from self._wait(.1)
         for width in LINE_WIDTHS:
             menu = window.btn_line_width.menu()
             action = next(action for action in menu.actions() if action.data() == width)

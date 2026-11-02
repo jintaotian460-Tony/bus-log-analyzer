@@ -4,7 +4,7 @@ import numpy as np
 import pytest
 from PySide6.QtCore import Qt
 
-from core.plot_style import LINE_WIDTHS, normalise_line_width
+from core.plot_style import LINE_WIDTHS, normalise_line_width, selected_line_width
 from core.signal_store import SignalSeries, SignalStore
 from core.analysis_templates import normalise_template
 from gui import analysis_templates
@@ -37,19 +37,26 @@ def test_explicit_width_survives_points_selection_and_rebuild(qapp, mode):
             panel._restore_selection([first.key])
             for show in (True, False):
                 panel.set_show_points(show)
-                for item in panel._items.values():
-                    assert item.curve.opts['pen'].widthF() == width
+                for key, item in panel._items.items():
+                    # the explicit-width branch runs ahead of point mode, so
+                    # selection thickens the curve in both point states
+                    expected = (selected_line_width(width) if key == first.key
+                                else width)
+                    assert item.curve.opts['pen'].widthF() == expected, key
             assert np.shares_memory(panel._items[first.key].curve.xData, first.timestamps)
         panel.set_series_line_style(first.key, 'dash')
         panel.set_hide_lines(False)
         panel.redraw()
-        assert all(item.curve.opts['pen'].widthF() == LINE_WIDTHS[-1] for item in panel._items.values())
+        assert all(item.curve.opts['pen'].widthF() ==
+                   (selected_line_width(LINE_WIDTHS[-1]) if key == first.key
+                    else LINE_WIDTHS[-1])
+                   for key, item in panel._items.items())
         panel.set_show_points(True)
         panel.set_hide_lines(True)
         panel.set_line_width(1)
         assert panel._items[first.key].curve.opts['pen'].style() == Qt.PenStyle.NoPen
         panel.set_hide_lines(False)
-        assert panel._items[first.key].curve.opts['pen'].widthF() == 1
+        assert panel._items[first.key].curve.opts['pen'].widthF() == selected_line_width(1)
         panel.set_line_width(None)
         panel._restore_selection([])
         assert panel._items[first.key].curve.opts['pen'].widthF() == panel._POINTS_LINE_WIDTH
@@ -133,3 +140,33 @@ def test_toolbar_overflow_configuration_and_template_keep_the_width(qapp, tmp_pa
 @pytest.mark.parametrize('value', [None, True, -1, 0, float('nan'), float('inf'), 'bad', [], {}])
 def test_invalid_width_falls_back_to_automatic(value):
     assert normalise_line_width(value) is None
+
+
+def test_selecting_a_row_highlights_its_curve_at_every_width(qapp):
+    """The user-facing point of an explicit width: picking a row in the
+    table must be visible on the plot — the selected curve thickens."""
+    panel = PlotPanel()
+    try:
+        first, second = series('A'), series('B')
+        panel.add_series(first.key, first)
+        panel.add_series(second.key, second)
+        qapp.processEvents()
+
+        # automatic mode highlights by its own pair
+        panel._restore_selection([second.key])
+        assert panel._items[first.key].curve.opts['pen'].widthF() == panel._LINE_WIDTH
+        assert panel._items[second.key].curve.opts['pen'].widthF() == panel._SELECTED_LINE_WIDTH
+
+        # and so does every explicit width
+        for width in LINE_WIDTHS:
+            panel.set_line_width(width)
+            assert panel._items[first.key].curve.opts['pen'].widthF() == width
+            assert panel._items[second.key].curve.opts['pen'].widthF() == selected_line_width(width)
+
+        # clearing the selection puts both back to the exact width
+        panel._restore_selection([])
+        for item in panel._items.values():
+            assert item.curve.opts['pen'].widthF() == LINE_WIDTHS[-1]
+    finally:
+        panel.close()
+        qapp.processEvents()

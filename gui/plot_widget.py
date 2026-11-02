@@ -51,7 +51,7 @@ from PySide6.QtWidgets import (
 
 from core.signal_statistics import range_statistics
 from core.signal_store import SignalSeries
-from core.plot_style import normalise_line_width
+from core.plot_style import normalise_line_width, selected_line_width
 from core.playback import data_gaps, merge_gaps, sample_at
 from gui.tabular_view import TabularView
 from gui.edge_tab import _mix
@@ -2883,9 +2883,13 @@ class PlotPanel(QWidget):
         if self._hide_lines:
             pen = pg.mkPen(None)
         elif self._line_width is not None:
-            # An explicit width is exact, including selected signals and
-            # point mode. Selection remains visible in the signal list.
-            pen = pg.mkPen(color=plotted.color, width=self._line_width,
+            # An explicit width is exact for the curve as drawn; the
+            # selected one thickens (selected_line_width) so picking a row
+            # in the table is visible on the plot at every width.
+            width = self._line_width
+            if selected:
+                width = selected_line_width(width)
+            pen = pg.mkPen(color=plotted.color, width=width,
                            style=pen_style(plotted.line_style))
         elif self._show_points:
             width = (self._SELECTED_POINTS_LINE_WIDTH if selected

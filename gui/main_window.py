@@ -488,7 +488,7 @@ class MainWindow(QMainWindow):
         self.btn_points.setChecked(True)
         self.btn_line_width = QToolButton()
         self.btn_line_width.setAccessibleName('信号线宽')
-        self.btn_line_width.setToolTip('选择所有窗口的信号线宽；自动使用原有粗细。显式选择时，选中信号也保持所选线宽。')
+        self.btn_line_width.setToolTip('选择所有窗口的信号线宽；自动使用原有粗细。显式选择时，选中信号的曲线会加粗突出。')
         self.btn_line_width.setPopupMode(QToolButton.ToolButtonPopupMode.InstantPopup)
         width_menu = QMenu(self.btn_line_width)
         self.btn_line_width.setMenu(width_menu)

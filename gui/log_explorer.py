@@ -2,7 +2,7 @@
 from pathlib import Path
 import time
 
-from PySide6.QtCore import Qt, Signal, QDir, QMimeData, QProcess, QThread, QUrl
+from PySide6.QtCore import Qt, Signal, QDir, QMimeData, QProcess, QThread, QTimer, QUrl
 from PySide6.QtGui import QShortcut, QKeySequence, QDesktopServices
 from PySide6.QtWidgets import (
     QAbstractItemView, QApplication, QFileDialog, QFileSystemModel, QHBoxLayout,
@@ -152,6 +152,19 @@ class LogExplorer(QWidget):
                 self.tree.setCurrentIndex(index)
                 self.tree.scrollTo(index)
 
+    def _expand_all(self):
+        """Expand the whole tree, including folders that list a moment later.
+
+        QFileSystemModel populates a directory asynchronously after its parent
+        expands, and expandAll() only walks what the model already holds — so
+        one call leaves deeper levels folded. A few deferred passes catch up
+        with the listings as they arrive; each pass is cheap (already-expanded
+        folders are skipped by Qt).
+        """
+        self.tree.expandAll()
+        for delay in (200, 500, 1200):
+            QTimer.singleShot(delay, self.tree.expandAll)
+
     def _selected_paths(self):
         return [Path(self.model.filePath(index))
                 for index in self.tree.selectionModel().selectedRows(0) if index.isValid()]
@@ -192,6 +205,10 @@ class LogExplorer(QWidget):
         menu = QMenu(self)
         open_action = menu.addAction('打开所在文件夹' if path.is_file() else '打开文件夹')
         open_action.triggered.connect(lambda: self._open_in_explorer(path))
+        expand_action = menu.addAction('全部展开')
+        expand_action.triggered.connect(self._expand_all)
+        collapse_action = menu.addAction('全部折叠')
+        collapse_action.triggered.connect(self.tree.collapseAll)
         copy_path_action = menu.addAction('复制路径')
         copy_path_action.triggered.connect(lambda: self._copy_paths_to_clipboard(selected))
         copy_action = menu.addAction('复制')

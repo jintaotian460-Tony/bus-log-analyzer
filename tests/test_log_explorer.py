@@ -516,3 +516,38 @@ def test_delete_entry_is_offered_but_not_for_the_root(qapp, tmp_path, monkeypatc
         _stop_file_system_watch(explorer)
         window.close()
         qapp.processEvents()
+
+
+def test_log_tree_expand_and_collapse_all(qapp, tmp_path, monkeypatch):
+    from PySide6.QtTest import QTest
+    from gui.main_window import MainWindow
+
+    monkeypatch.setattr(QMessageBox, 'warning', Mock())
+    root = tmp_path / 'logs'
+    (root / 'case' / 'inner').mkdir(parents=True)
+    (root / 'case' / 'inner' / 'Recorder.csv').write_text('x', encoding='utf-8')
+
+    window = MainWindow('Expand all test', 'test')
+    explorer = window.log_explorer
+    try:
+        explorer.set_root(str(root))
+        QTest.qWait(600)                      # let the model list the tree
+        case = explorer.model.index(str(root / 'case'))
+        inner = explorer.model.index(str(root / 'case' / 'inner'))
+        assert case.isValid() and inner.isValid()
+
+        explorer._expand_all()
+        QTest.qWait(1600)                     # deferred passes: 200/500/1200 ms
+        assert explorer.tree.isExpanded(case)
+        assert explorer.tree.isExpanded(inner)
+
+        explorer.tree.collapseAll()
+        assert not explorer.tree.isExpanded(case)
+
+        menu = explorer._context_menu(root / 'case')
+        labels = [a.text() for a in menu.actions() if a.text()]
+        assert '全部展开' in labels and '全部折叠' in labels
+    finally:
+        _stop_file_system_watch(explorer)
+        window.close()
+        qapp.processEvents()

@@ -221,6 +221,10 @@ class ScenarioDriver(QObject):
                 yield from self._compact_layout(record)
             elif step['op'] == 'plot_controls':
                 yield from self._plot_controls(record)
+            elif step['op'] == 'window_lists_only':
+                yield from self._window_lists_only(record)
+            elif step['op'] == 'inheritance_by_name':
+                yield from self._inheritance_by_name(step, record)
             elif step['op'] == 'close_during_load':
                 yield from self._close_during_load(record)
                 return
@@ -501,6 +505,97 @@ class ScenarioDriver(QObject):
             record['signals_restored'] = window.signal_dock.isVisible()
         finally:
             explorer.fileActivated.disconnect(request_received)
+
+    def _window_lists_only(self, record: dict):
+        """The real startup/load path must reclaim the obsolete global list."""
+        from PySide6.QtTest import QTest
+        from PySide6.QtCore import Qt
+        window, panel = self._window, self._window.plot_panel
+        deadline = time.monotonic() + LOAD_TIMEOUT
+        while window._thread is not None:
+            if time.monotonic() > deadline:
+                raise RuntimeError('Startup configuration load timed out')
+            yield
+        assert window.store is not None
+        assert panel._windows_mode and window.btn_windows.isChecked()
+        assert panel.table_panel.isHidden()
+        keys = panel.plotted_keys()
+        if not keys:
+            keys = window.store.all_keys()[:6]
+            window.add_signals_to_plot(keys)
+        if len(panel._window_specs) == 1:
+            QTest.mouseClick(window.btn_new_window, Qt.MouseButton.LeftButton)
+        window.signal_dock.hide()
+        window.btn_cursor1.setChecked(True)
+        yield from self._wait(.2)
+        window.btn_table.setChecked(True)
+        yield from self._wait(.2)
+        assert panel.tabular.isVisibleTo(window)
+        assert panel.table_panel.isHidden()
+        window.btn_table.setChecked(False)
+        yield from self._wait(.2)
+        assert window.center_splitter.sizes()[0] == 0
+        assert window.center_splitter.widget(1).geometry().left() == 0
+        listed = [key for _widget, tree, _title in panel._window_widgets.values()
+                  for key in tree.rows]
+        assert sorted(listed) == sorted(panel.plotted_keys())
+        for _widget, tree, _title in panel._window_widgets.values():
+            for key, item in tree.rows.items():
+                assert item.text(1) == panel.table.item(panel._row_lookup[key], 2).text()
+        screenshot = str(self._result_path.with_suffix('.window-lists-only.png'))
+        window.grab().save(screenshot)
+        record.update(outcome='passed', global_signal_list_hidden=True,
+                      global_list_width=window.center_splitter.sizes()[0],
+                      local_signal_lists=True, cursor_values_preserved=True,
+                      sample_table_works=True, windows=len(panel._window_specs),
+                      screenshot=screenshot)
+
+    def _inheritance_by_name(self, step: dict, record: dict):
+        """Check real recording switches against exact-name inheritance."""
+        window, panel = self._window, self._window.plot_panel
+        expected = {}
+        record['switches'] = []
+        for number, file_index in enumerate(step['files']):
+            file = self._files[file_index]
+            window.open_measurement_path(file['path'], auto_decode=True)
+            deadline = time.monotonic() + LOAD_TIMEOUT
+            while window._thread is not None:
+                if time.monotonic() > deadline:
+                    raise RuntimeError('Name inheritance load timed out')
+                yield
+            assert window.store is not None
+            if number == 0:
+                panel.clear_all()
+                window.signal_tree.select_signal_keys([])
+                keys = [next(k for k in window.store.all_keys()
+                             if window.store.get_series(k).signal_name == name)
+                        for name in step['signals']]
+                window.add_signals_to_plot(keys)
+                window.signal_tree.select_signal_keys(keys)
+                expected = {panel._items[k].series.signal_name:
+                            (panel._items[k].color, panel._items[k].window_id)
+                            for k in keys}
+            assert len(panel.plotted_keys()) == len(step['signals'])
+            rows = []
+            for key in panel.plotted_keys():
+                item = panel._items[key]
+                name = item.series.signal_name
+                assert name in expected and not item.unavailable_reason
+                assert item.series is window.store.get_series(key)
+                assert len(item.series.values) > 0
+                assert (item.color, item.window_id) == expected[name]
+                rows.append(dict(name=name, key=key, unit=item.series.unit,
+                                 samples=len(item.series.values)))
+            assert not window.signal_tree._unavailable_signals
+            assert panel.table_panel.isHidden()
+            record['switches'].append(dict(file=file['alias'], signals=rows))
+        window.signal_dock.hide()
+        window.btn_fit.click()
+        yield from self._wait(.3)
+        screenshot = str(self._result_path.with_suffix('.inheritance-by-name.png'))
+        window.grab().save(screenshot)
+        record.update(outcome='passed', exact_names=True, new_recording_data=True,
+                      styles_preserved=True, screenshot=screenshot)
 
     def _log_file_operations(self, record: dict):
         """Use actual context-menu events/actions, then verify newly written data."""

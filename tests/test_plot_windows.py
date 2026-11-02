@@ -25,6 +25,7 @@ def windows(qapp):
 
 def test_each_window_has_its_own_list_and_one_source_of_data(windows, qapp):
     panel = windows
+    assert panel.table_panel.isHidden()
     a, b = series('A'), series('B')
     panel.add_series(a.key, a)
     panel.new_window()

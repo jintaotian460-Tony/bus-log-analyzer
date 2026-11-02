@@ -52,12 +52,35 @@ def capture(window, config):
 
 def restore(window, config):
     entries = deepcopy(config['inheritance'])
-    original_keys = [entry['key'] for entry in entries]
     raw_entries = [entry for entry in entries if not window.calculated_signals.contains_key(entry['key'])]
     matches = iter(match_signals(raw_entries, window.store))
     unavailable = {}
     selected = []
     generated = []
+    mapping = {}
+    resolved = {}
+    for entry in entries:
+        original_key = entry['key']
+        if window.calculated_signals.contains_key(original_key):
+            key, reason = original_key, '正在重新计算'
+        else:
+            key, reason = next(matches)
+        if key:
+            entry['key'] = key
+            if not window.calculated_signals.contains_key(key):
+                entry['identity'] = identity(key, window.store.get_series(key))
+        else:
+            key = original_key
+        mapping[original_key] = key
+        if key in resolved:
+            # Two old channels with the same name can resolve to one new
+            # signal. Keep one presentation and combine their selections.
+            previous, _ = resolved[key]
+            previous['plotted'] |= entry['plotted']
+            previous['selected'] |= entry['selected']
+        else:
+            resolved[key] = (entry, reason)
+    entries = [entry for entry, _reason in resolved.values()]
     window._inherited_dependencies = deepcopy(config.get('dependencies', {}))
     refs = list(window._inherited_dependencies)
     matched_refs = match_signals([{'identity': window._inherited_dependencies[k]} for k in refs], window.store)
@@ -65,19 +88,12 @@ def restore(window, config):
     window._inherited_signals = entries
     window.plot_panel.begin_batch_add()
     try:
-        for entry in entries:
-            if window.calculated_signals.contains_key(entry['key']):
-                key, reason = entry['key'], '正在重新计算'
+        for entry, reason in resolved.values():
+            key = entry['key']
+            if window.calculated_signals.contains_key(key):
                 if entry['plotted']:
                     generated.append(key)
-            else:
-                key, reason = next(matches)
-            if key:
-                entry['key'] = key
-                if not window.calculated_signals.contains_key(key):
-                    entry['identity'] = identity(key, window.store.get_series(key))
-            else:
-                key = entry['key']
+            elif reason:
                 unavailable[key] = (entry['identity']['name'], reason)
             if entry['selected']:
                 selected.append(key)
@@ -102,16 +118,25 @@ def restore(window, config):
     window.signal_tree.set_unavailable_signals(unavailable)
     window.signal_tree.select_signal_keys(selected)
     if config.get('window_layout') and window.plot_panel._windows_mode:
-        mapping = dict(zip(original_keys, [entry['key'] for entry in entries]))
-        window.plot_panel.apply_window_layout(config['window_layout'], mapping)
+        layout = deepcopy(config['window_layout'])
+        assigned = set()
+        for spec in layout:
+            keys = []
+            for original_key in spec['keys']:
+                key = mapping.get(original_key, original_key)
+                if key not in assigned:
+                    keys.append(original_key)
+                    assigned.add(key)
+            spec['keys'] = keys
+        window.plot_panel.apply_window_layout(layout, mapping)
     for key in generated:
         # The placeholder already owns its saved window. Queue recomputation
         # directly rather than routing it as a user drag into the active one.
         definition = window.calculated_signals.definition(key)
         window._queue_calculation(definition, 'lazy', plot_after=True)
     missing = len(unavailable)
-    window._log(f'Signal inheritance: {len(entries) - missing} matched, {missing} unavailable / pending confirmation.')
-    return dict(zip(original_keys, [entry['key'] for entry in entries]))
+    window._log(f'Signal inheritance: {len(entries) - missing} matched by exact name, {missing} unavailable.')
+    return mapping
 
 
 def confirm_mapping(window, key):

@@ -265,9 +265,11 @@ def test_plot_modes_come_first_then_a_gap_then_the_icon_buttons_then_clear_plot(
     assert clear.x() - (time_ticks.x() + time_ticks.width()) > 2 * row.SPACING
 
 
-def test_plot_buttons_are_level_with_the_table_header(window):
+def test_plot_buttons_are_level_with_the_table_header(window, qapp):
     from PySide6.QtCore import QPoint
 
+    window.btn_windows.setChecked(False)  # legacy renderer's table geometry
+    qapp.processEvents()
     splitter = window.center_splitter
     row = window.plot_button_row
     table = window.plot_panel.table
@@ -294,6 +296,8 @@ def test_the_table_ends_level_with_the_plot(qapp, window):
     from PySide6.QtCore import QPoint
     from core.signal_store import SignalSeries
 
+    window.btn_windows.setChecked(False)  # this table is hidden in product layout
+    qapp.processEvents()
     splitter = window.center_splitter
 
     def bottom(widget):
@@ -383,6 +387,8 @@ def test_the_cursor_readout_reads_a_point_larger_than_the_table(qapp, window):
 
 
 def test_narrow_plot_moves_buttons_into_the_menu_not_the_table_aside(qapp, window):
+    window.btn_windows.setChecked(False)  # legacy two-pane renderer only
+    qapp.processEvents()
     splitter = window.center_splitter
     total = sum(splitter.sizes())
 

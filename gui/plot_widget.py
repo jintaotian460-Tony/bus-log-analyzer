@@ -1788,6 +1788,10 @@ class PlotPanel(QWidget):
     def set_windows(self, enabled: bool) -> None:
         saved = self._visible_x_range()
         self._windows_mode = bool(enabled)
+        # This also runs during startup, before the mode button can emit a
+        # toggle. Each window owns its visible list; the old table is only a
+        # backing model for styles and cursor values in this layout.
+        self.table_panel.setVisible(not self._windows_mode)
         self.window_ruler.setVisible(enabled)
         self._stacked_mode = bool(enabled)
         self._multistack_mode = self._multi_axis = False

@@ -256,10 +256,13 @@ standard frame objects; they may ignore Osvanta's sparse-observation markers.
 
 Double-clicking another log in the explorer carries selected signals and plot
 presentation (order, colour, groups, line style and axes) to the new recording.
-Full channel/message/signal identities match first. A unique name can match
-when its unit agrees and no explicit bus/channel conflict exists. Ambiguous
-signals remain **待确认**; right-click the inherited tree entry and choose
-**匹配到本日志信号…** to confirm a binding.
+Only the complete signal name must match, including case and whitespace;
+units, buses, channels and message groups do not block inheritance. Values
+and units always come from the new recording. For multiple same-name channels,
+the existing full key is preferred when present; otherwise the first channel
+in recording order is used. Old selections that resolve to one channel appear
+once. Right-click an unmatched entry and choose **匹配到本日志信号…** to select
+a different signal manually.
 
 Unavailable signals remain grey, labelled **本日志未匹配**, with empty samples.
 They recover when a later recording contains them. Calculated curves are
@@ -282,6 +285,8 @@ layouts use the same ruler.
 ### Multi-window analysis and engineering templates
 
 **多窗口** arranges graph windows vertically, each with its own signal list.
+The obsolete global signal list stays hidden and takes no plot width, including
+after startup, configuration restore and log changes.
 Click its title to select the destination, then double-click a signal or drag
 it into that window. Moving an already plotted signal transfers it to the
 destination window. **＋窗口** adds a window; arrows change its order, its close

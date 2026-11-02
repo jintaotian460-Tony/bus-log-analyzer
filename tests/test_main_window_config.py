@@ -97,6 +97,54 @@ def test_old_layout_handoffs_normalize_to_windows(window):
     assert window._configuration_dict()['stacked'] is False
 
 
+def test_default_windows_layout_hides_global_list_and_reclaims_its_width(window, qapp):
+    import numpy as np
+    from core.signal_store import SignalStore
+
+    window.resize(1400, 900)
+    window.show()
+    qapp.processEvents()
+    panel = window.plot_panel
+    assert panel.table_panel.isHidden()
+    assert window.center_splitter.sizes()[0] == 0
+    assert window.center_splitter.widget(1).geometry().left() == 0
+
+    store = SignalStore()
+    store.add_series_bulk(channel=1, message_name='Demo', message_id=1,
+                          signal_name='Temperature', unit='degC',
+                          timestamps=np.array([0., 1.]), values=np.array([10., 15.]),
+                          raw_values=[], has_labels=False)
+    window._on_worker_finished(store)
+    key = store.all_keys()[0]
+    window.add_signal_to_plot(key)
+    panel.new_window()
+    window.btn_cursor1.setChecked(True)
+    panel.move_cursor1(1.)
+    qapp.processEvents()
+
+    assert panel.table_panel.isHidden()
+    assert window.center_splitter.sizes()[0] == 0
+    assert panel.table.rowCount() == 1  # retained only as the cursor/style data source
+    row = panel.table.item(panel._row_lookup[key], 2)
+    local = panel._window_widgets[0][1].rows[key]
+    assert row.text() == local.text(1) == '15.000'
+    assert panel._window_widgets[1][1].topLevelItemCount() == 0
+    window.btn_table.setChecked(True)
+    qapp.processEvents()
+    assert panel.tabular.isVisibleTo(window)
+    assert panel.table_panel.isHidden()
+
+
+@pytest.mark.parametrize('config', [{'windows': True}, {'stacked': True}, {'multi_axis': True}])
+def test_configuration_restore_does_not_reveal_global_list(window, qapp, tmp_path, config):
+    window.show()
+    window._apply_configuration(config, str(tmp_path / 'layout.json'))
+    qapp.processEvents()
+    assert window.plot_panel.table_panel.isHidden()
+    assert window.center_splitter.sizes()[0] == 0
+    assert window.plot_panel._windows_mode
+
+
 def test_partial_measurement_load_warns_but_keeps_finished_store(window):
     from PySide6.QtWidgets import QMessageBox
     from core.signal_store import SignalStore

@@ -1719,7 +1719,6 @@ class MainWindow(QMainWindow):
             self.btn_multi_axis.setChecked(False)
             self.btn_stacked.setChecked(False)
             self.btn_multistack.setChecked(False)
-        self.plot_panel.table_panel.setVisible(not checked)
         self.btn_new_window.setEnabled(checked)
         self.plot_panel.set_windows(checked)
         self._sync_plot_layout_menu()

@@ -83,7 +83,6 @@ from core.signal_store import SignalStore
 from core.plot_style import LINE_WIDTHS, normalise_line_width
 from gui.overflow_row import OverflowButtonRow
 from gui.plot_icons import icon_button, plot_icon
-from gui.plot_tag import PlotTag, load_plot_tag, save_plot_tag
 from gui.plot_widget import PlotPanel
 from gui.playback_bar import PlaybackBar
 from gui.signal_tree import SignalTreeWidget
@@ -291,7 +290,7 @@ class MainWindow(QMainWindow):
         self._temporary_plot_config_path = (
             self._settings_folder() / 'osvanta_temp_plot_config.json'
         )
-        # The user's own settings, such as the tag under the signal table.
+        # The user's own settings, such as the signal-table column widths.
         self._user_settings_path = (
             self._settings_folder() / 'osvanta_user_settings.json'
         )
@@ -424,8 +423,6 @@ class MainWindow(QMainWindow):
         self.plot_panel.signalLineStyleChanged.connect(self._on_signal_line_style_changed)
         self.plot_panel.plotAreaClicked.connect(self._place_cursor1)
         self.plot_panel.plotAreaShiftClicked.connect(self._place_cursor2)
-        self.plot_panel.set_tag(load_plot_tag(self._user_settings_path))
-        self.plot_panel.tagChanged.connect(self._save_plot_tag)
         columns = read_setting(self._user_settings_path, 'signal_table_columns', {})
         self.plot_panel.set_column_choices(columns if isinstance(columns, dict) else {})
         self.plot_panel.columnChoicesChanged.connect(self._save_column_choices)
@@ -1322,12 +1319,6 @@ class MainWindow(QMainWindow):
             write_setting(self._user_settings_path, 'signal_table_columns', dict(choices))
         except OSError as exc:
             self._log(f'Settings save warning: {exc}')
-
-    def _save_plot_tag(self, tag: PlotTag) -> None:
-        try:
-            save_plot_tag(self._user_settings_path, tag)
-        except OSError as exc:
-            self._log(f'Tag save warning: {exc}')
 
     def _capture_temporary_plot_configuration(self) -> dict | None:
         """Persist the current plot-only setup for the next measurement."""

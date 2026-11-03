@@ -55,7 +55,8 @@ from core.plot_style import normalise_line_width, selected_line_width
 from core.playback import data_gaps, merge_gaps, sample_at
 from gui.tabular_view import TabularView
 from gui.edge_tab import _mix
-from gui.plot_tag import SEPARATOR, TAG_HINT, PlotTag, PlotTagDialog, current_user_name
+# Between the parts of the cursor readout and the file-name label.
+SEPARATOR = '   |   '
 from gui.signal_tree import SignalTreeWidget
 from gui.time_axis import TimeAxis
 from gui import plot_windows, observation_style
@@ -69,7 +70,6 @@ _CURSOR_ON_DARK = '#ffffff'
 _CURSOR_HOVER_COLOR = '#ff0000'
 # The tag hint's colour, this far from the strip's colour toward its text:
 # readable, yet plainly not a tag.
-_TAG_HINT_SHADE = 0.55
 # A group's row in the signal table, this far from the window colour toward
 # its text: the app's own colours, a shade apart from the table's header.
 _GROUP_ROW_SHADE = 0.08
@@ -956,8 +956,6 @@ class PlotPanel(QWidget):
     plotAreaClicked = Signal(float)
     # The same for a left click with Shift held.
     plotAreaShiftClicked = Signal(float)
-    # The user changed or removed the tag under the signal table (a PlotTag).
-    tagChanged = Signal(object)
     # A column was shown or hidden from the table header: {name: shown}.
     columnChoicesChanged = Signal(dict)
     # "Show measurement events" was ticked or unticked in a plot's menu.
@@ -1228,31 +1226,6 @@ class PlotPanel(QWidget):
         self._table_bottom_gap.setAttribute(Qt.WidgetAttribute.WA_StyledBackground)
         self._table_bottom_gap.setFixedHeight(0)
         _tbl_layout.addWidget(self._table_bottom_gap)
-        # The user's tag, on the cursor line's level. A double-click on the
-        # strip, or its right-click menu, edits it.
-        self._tag = PlotTag()
-        self.tag_label = _ElidedLabel()
-        self.tag_label.setObjectName('plotTag')
-        self.tag_label.setFont(self.cursor_label.font())
-        self.tag_label.setAttribute(Qt.WidgetAttribute.WA_TransparentForMouseEvents)
-        self.tag_label.hide()
-        # In the tag's place while there is none: how to add one.
-        self.tag_hint = _ElidedLabel()
-        self.tag_hint.setObjectName('plotTagHint')
-        self.tag_hint.setFont(self.cursor_label.font())
-        self.tag_hint.setAttribute(Qt.WidgetAttribute.WA_TransparentForMouseEvents)
-        self.tag_hint.set_full_text(TAG_HINT)
-        self.tag_hint.hide()
-        self._tag_layout = QHBoxLayout(self._table_bottom_gap)
-        self._tag_layout.setSpacing(0)
-        self._tag_layout.addWidget(self.tag_label)
-        self._tag_layout.addWidget(self.tag_hint)
-        self._table_bottom_gap.installEventFilter(self)
-        # A tag with the date shows the new date from midnight on.
-        self._tag_date_timer = QTimer(self)
-        self._tag_date_timer.setSingleShot(True)
-        self._tag_date_timer.timeout.connect(self._show_tag)
-        self._show_tag()
         # Drag-and-drop onto the signal table:
         #   • Internal drags (row reorder) use _ReorderTable.startDrag → custom MIME
         #   • External drags (from SignalTreeWidget) use SignalTreeWidget.MIME_TYPE
@@ -4212,7 +4185,6 @@ class PlotPanel(QWidget):
         self.overlay_label.setVisible((not has_items) and bool(self.overlay_label.text()))
         self.cursor_label.setVisible(has_items)
         self.file_name_label.setVisible(has_items and bool(self.file_name_label.full_text()))
-        self._show_tag()
         if self._stacked_mode and (has_items or self._windows_mode):
             self.view_stack.setCurrentIndex(1)
         else:
@@ -5739,14 +5711,6 @@ class PlotPanel(QWidget):
         if watched is self.view_stack and event.type() in (QEvent.Type.Resize,
                                                            QEvent.Type.Move):
             self._match_table_bottom_to_plot()
-        elif watched is self._table_bottom_gap:
-            if (event.type() == QEvent.Type.MouseButtonDblClick
-                    and event.button() == Qt.MouseButton.LeftButton):
-                self.edit_tag()
-                return True
-            if event.type() == QEvent.Type.ContextMenu:
-                self._show_tag_menu(event.globalPos())
-                return True
         return super().eventFilter(watched, event)
 
     def _match_table_bottom_to_plot(self) -> None:
@@ -5755,58 +5719,6 @@ class PlotPanel(QWidget):
         # to leave under the table.
         plot = self.area_stack.geometry()   # the plots, and the table beside them
         self._table_bottom_gap.setFixedHeight(max(0, self.height() - plot.y() - plot.height()))
-        # The tag lies as far under the table as the cursor line under the
-        # plot, and as tall, so the two read as one line.
-        root = self.layout()
-        margins = root.contentsMargins()
-        self._tag_layout.setContentsMargins(
-            margins.left(), root.spacing(), margins.right(), margins.bottom())
-
-    # ── Tag ───────────────────────────────────────────────────────────────
-
-    def tag(self) -> PlotTag:
-        return self._tag
-
-    def set_tag(self, tag: PlotTag) -> None:
-        self._tag = tag
-        self._show_tag()
-
-    def edit_tag(self) -> None:
-        dialog = PlotTagDialog(self._tag, self)
-        if dialog.exec() and dialog.tag() != self._tag:
-            self.set_tag(dialog.tag())
-            self.tagChanged.emit(self._tag)
-
-    def _remove_tag(self) -> None:
-        self.set_tag(PlotTag())
-        self.tagChanged.emit(self._tag)
-
-    def _tag_menu(self) -> QMenu:
-        has_tag = self._tag != PlotTag()
-        menu = QMenu(self)
-        menu.addAction('Edit Tag…' if has_tag else 'Add Tag…', self.edit_tag)
-        if has_tag:
-            menu.addAction('Remove Tag', self._remove_tag)
-        return menu
-
-    def _show_tag_menu(self, global_pos) -> None:
-        self._tag_menu().exec(global_pos)
-
-    def _show_tag(self) -> None:
-        text = self._tag.compose(current_user_name(), datetime.date.today())
-        self.tag_label.set_full_text(text)
-        self.tag_label.setVisible(bool(self._items) and bool(text))
-        self.tag_hint.setVisible(bool(self._items) and not text)
-        self._table_bottom_gap.setToolTip(
-            'Double-click to edit the tag' if text
-            else 'Double-click to add a tag: your text, user name or the date')
-        self._tag_date_timer.stop()
-        if self._tag.date:
-            now = datetime.datetime.now()
-            midnight = datetime.datetime.combine(
-                now.date() + datetime.timedelta(days=1), datetime.time())
-            # A second past midnight, so the new day has begun.
-            self._tag_date_timer.start(int((midnight - now).total_seconds() * 1000) + 1000)
 
     def changeEvent(self, event) -> None:
         super().changeEvent(event)
@@ -5821,7 +5733,6 @@ class PlotPanel(QWidget):
     def _apply_panel_background(self) -> None:
         bg = self._background_color
         header_bg, header_text, header_border = self._applied_header_colors = self._header_colors()
-        tag_hint = _mix(QColor(header_bg), QColor(header_text), _TAG_HINT_SHADE).name()
         # No frame, and no line above or left of the header: the table sits
         # flush in the panel's top-left corner, and the header row, the window
         # colour across the panel's width, joins the window around it as the
@@ -5842,8 +5753,6 @@ class PlotPanel(QWidget):
                 background-color: {header_bg};
                 border: none;
             }}
-            QLabel#plotTag {{ background-color: {header_bg}; color: {header_text}; }}
-            QLabel#plotTagHint {{ background-color: {header_bg}; color: {tag_hint}; }}
             QHeaderView::section {{
                 background-color: {header_bg};
                 color: {header_text};

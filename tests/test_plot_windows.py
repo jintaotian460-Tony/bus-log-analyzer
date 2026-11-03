@@ -71,8 +71,7 @@ def test_whole_window_axes_switch_and_y_ranges_are_independent(windows, qapp):
     panel.add_series(a.key, a)
     panel.add_series(b.key, b)
     assert panel._items[a.key].view_box is panel._items[b.key].view_box
-    combo = panel._window_widgets[0][0].findChildren(__import__('PySide6.QtWidgets', fromlist=['QComboBox']).QComboBox)[0]
-    combo.setCurrentIndex(1)
+    plot_windows.change_axis_mode(panel, 0, 'individual')
     qapp.processEvents()
     assert panel._window_specs[0]['axis_mode'] == 'individual'
     assert panel._items[a.key].view_box is not panel._items[b.key].view_box

@@ -1448,21 +1448,13 @@ class MainWindow(QMainWindow):
         if self.playback.follow.isChecked() and self.playback.clock.playing:
             self.plot_panel.follow_playback_time(
                 position, self.playback.clock.start, self.playback.clock.end)
-        self._playback_freshness(position)
 
     def _playback_cursor_moved(self, position: float) -> None:
         if self.playback.isEnabled():
             self.playback.follow_cursor(position)
-            self._playback_freshness(position)
 
     def _playback_gap_changed(self, timeout: float) -> None:
         self.plot_panel.set_gap_timeout(timeout)
-        self._playback_freshness(self.playback.clock.position)
-
-    def _playback_freshness(self, position: float) -> None:
-        text, details = self.plot_panel.freshness_summary(position)
-        self.playback.gap_label.setText(text)
-        self.playback.gap_label.setToolTip(details)
 
     def _release_store(self) -> None:
         """Drop the decoded measurement and close the file its signals read."""
@@ -2722,7 +2714,6 @@ class MainWindow(QMainWindow):
                 self.plot_panel.apply_window_layout(self._pending_window_layout)
                 self._pending_window_layout = []
             self.plot_panel.playback_at(self.playback.clock.position)
-            self._playback_freshness(self.playback.clock.position)
             return
 
         # Reload from config measurement path (+ database, if the format needs one)
@@ -3470,7 +3461,6 @@ class MainWindow(QMainWindow):
             self.plot_panel.apply_window_layout(self._pending_window_layout)
             self._pending_window_layout = []
         self.plot_panel.move_cursor1(self.playback.clock.position)
-        self._playback_freshness(self.playback.clock.position)
         if load_warnings:
             shown = load_warnings[:20]
             details = '\n'.join(f'• {warning}' for warning in shown)

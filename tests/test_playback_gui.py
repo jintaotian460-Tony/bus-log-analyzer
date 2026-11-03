@@ -163,7 +163,7 @@ def test_observation_header_tracks_cursors_without_transport_controls(qapp, monk
     assert window.btn_cursor1.isChecked()
     assert window.plot_panel.v_line.value() == 9
     assert cell(window.plot_panel) == 'Stale (8.0 s)'
-    assert 'NO FRESH DATA' in window.playback.gap_label.text()
+    assert window.playback.gap_timeout.isHidden()
     assert window._configuration_dict()['playback']['time_mode'] == 'wall'
     now = [0.0]
     window.playback.clock.now = lambda: now[0]

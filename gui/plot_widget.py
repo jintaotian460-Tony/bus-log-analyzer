@@ -6,7 +6,6 @@
 
 from __future__ import annotations
 
-import datetime
 import weakref
 from dataclasses import dataclass
 from itertools import cycle
@@ -5314,13 +5313,15 @@ class PlotPanel(QWidget):
         self._rebuild_curves(preserve_selection=True)
 
     def _show_signal_menu(self, selected_keys: list, global_pos,
-                          time_s: float | None = None) -> None:
+                          time_s: float | None = None, *, window_id: int | None = None) -> None:
         """Shared signal context menu used by table and stacked plot right-click;
         *time_s*, the time under a right-click on a plot, offers a marker there."""
         menu = self._make_menu()
+        if self._windows_mode and window_id is not None:
+            plot_windows.add_axis_mode_menu(self, menu, window_id)
+            menu.addSeparator()
         has_sel   = bool(selected_keys)
         has_one   = len(selected_keys) == 1
-        has_items = bool(self._items)   # any signal plotted at all
 
         # Change color — only when exactly one signal selected
         act_color = QAction('Change signal color...', menu)
@@ -5481,9 +5482,13 @@ class PlotPanel(QWidget):
                 if i < len(self._stacked_row_keys):
                     keys = self._stacked_row_keys[i]
                     self._restore_selection(keys)
+                    window_id = self._window_specs[i]['id'] if self._windows_mode else None
+                    if window_id is not None:
+                        plot_windows.activate(self, window_id)
                     # QCursor.pos() is always reliable for screen coordinates
                     self._show_signal_menu(keys, QCursor.pos(),
-                                           time_s=p.vb.mapSceneToView(pos).x())
+                                           time_s=p.vb.mapSceneToView(pos).x(),
+                                           window_id=window_id)
                     try:
                         event.accept()
                     except Exception:

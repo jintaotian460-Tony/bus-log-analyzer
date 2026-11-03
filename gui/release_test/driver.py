@@ -510,13 +510,57 @@ class ScenarioDriver(QObject):
         finally:
             explorer.fileActivated.disconnect(request_received)
 
+    def _window_axis_mode(self, window_id, mode):
+        from PySide6.QtCore import Qt, QTimer
+        from PySide6.QtWidgets import QMenu
+        from PySide6.QtTest import QTest
+        panel = self._window.plot_panel
+        _widget, tree, title = panel._window_widgets[window_id]
+        if tree.rows:
+            position = tree.visualItemRect(next(iter(tree.rows.values()))).center()
+            QTimer.singleShot(0, panel, lambda: tree.menu(position))
+        else:
+            position = title.rect().center()
+            QTimer.singleShot(0, panel, lambda: title.customContextMenuRequested.emit(position))
+        deadline = time.monotonic() + 3
+        popup = None
+        while time.monotonic() < deadline:
+            popup = next((menu for menu in panel.findChildren(QMenu)
+                          if menu.isVisible() and any(action.text() == '此窗口 Y 轴'
+                                                      for action in menu.actions())), None)
+            if popup is not None:
+                break
+            yield
+        assert popup is not None, {
+            'error': 'Window context menu did not open',
+            'window_visible': self._window.isVisible(), 'tree_visible': tree.isVisible(),
+            'menus': [(menu.title(), menu.isVisible(), [a.text() for a in menu.actions()])
+                      for menu in panel.findChildren(QMenu)],
+        }
+        try:
+            entry = next(action for action in popup.actions() if action.text() == '此窗口 Y 轴')
+            submenu = entry.menu()
+            QTest.mouseClick(popup, Qt.MouseButton.LeftButton,
+                             pos=popup.actionGeometry(entry).center())
+            deadline = time.monotonic() + 3
+            while not submenu.isVisible() and time.monotonic() < deadline:
+                yield
+            assert submenu.isVisible(), 'Window Y-axis submenu did not open'
+            action = next(action for action in submenu.actions() if action.data() == mode)
+            QTest.mouseClick(submenu, Qt.MouseButton.LeftButton,
+                             pos=submenu.actionGeometry(action).center())
+        finally:
+            popup.close()
+        yield from self._wait(.3)
+        assert next(spec for spec in panel._window_specs if spec['id'] == window_id)['axis_mode'] == mode
+
     def _observation_style(self, step: dict, record: dict):
         """Render actual recording data and exercise the compact local legends."""
         from PySide6.QtCore import Qt, QPoint, QPointF, QEvent
         from PySide6.QtGui import QMouseEvent
         from PySide6.QtWidgets import QComboBox
         from PySide6.QtTest import QTest
-        from gui import plot_windows, observation_style
+        from gui import observation_style
         window, panel = self._window, self._window.plot_panel
         deadline = time.monotonic() + LOAD_TIMEOUT
         while window._thread is not None:
@@ -549,7 +593,11 @@ class ScenarioDriver(QObject):
         assert not window.playback.play_button.isVisibleTo(window)
         assert not window.playback.follow.isVisibleTo(window)
         assert not hasattr(window, 'btn_time_10ms')
-        assert window.playback.height() <= window.playback.gap_timeout.sizeHint().height()+8
+        assert window.playback.gap_timeout.isHidden()
+        assert window.playback.height() <= max(window.playback.time_label.sizeHint().height(),
+                                                window.playback.time_mode.sizeHint().height())+8
+        assert all(not widget.findChildren(QComboBox)
+                   for widget, _tree, _title in panel._window_widgets.values())
         original = {key: item.series for key, item in panel._items.items()}
         for _widget, tree, _title in panel._window_widgets.values():
             assert not tree.isColumnHidden(1) and not tree.isColumnHidden(2)
@@ -580,9 +628,7 @@ class ScenarioDriver(QObject):
         assert not panel._items[first_key].curve.isVisible()
         panel._window_widgets[panel._window_specs[0]['id']][1].rows[first_key].setCheckState(0, Qt.CheckState.Checked)
         yield from self._wait(.2)
-        combo = panel._window_widgets[panel._window_specs[0]['id']][0].findChild(QComboBox)
-        combo.setCurrentIndex(1)
-        yield from self._wait(.3)
+        yield from self._window_axis_mode(panel._window_specs[0]['id'], 'individual')
         assert len(panel._window_extra_axes) == len(step['groups'][0]['signals'])-1
         independent = str(self._result_path.with_suffix('.observation-independent.png'))
         assert window.grab().save(independent)
@@ -591,11 +637,11 @@ class ScenarioDriver(QObject):
         light = str(self._result_path.with_suffix('.observation-light.png'))
         assert window.grab().save(light)
         panel.set_background_color('#000000')
-        panel._window_widgets[panel._window_specs[0]['id']][0].findChild(QComboBox).setCurrentIndex(0)
-        yield from self._wait(.2)
+        yield from self._window_axis_mode(panel._window_specs[0]['id'], 'shared')
         assert all(panel._items[key].series is value for key, value in original.items())
         record.update(outcome='passed', signals=len(original), local_legends=True,
                       compact_header=True, transport_controls_removed=True, fixed_tick_button_removed=True,
+                      gap_header_removed=True, window_axis_context_menu=True, axis_header_removed=True,
                       cursor_handle_drag=True, cursor_values=True, visibility_toggle=True,
                       independent_axes=True, background_switch=True, original_data=True,
                       screenshot=screenshot, independent_screenshot=independent, light_screenshot=light)
@@ -962,7 +1008,7 @@ class ScenarioDriver(QObject):
         from PySide6.QtCore import Qt, QPointF, QEvent
         from PySide6.QtGui import QMouseEvent
         from PySide6.QtTest import QTest
-        from PySide6.QtWidgets import QComboBox, QToolButton
+        from PySide6.QtWidgets import QToolButton
         from core.project_config import save_project, load_project
         from gui import analysis_templates, plot_windows
         window = self._window
@@ -987,9 +1033,7 @@ class ScenarioDriver(QObject):
         yield from self._wait(.3)
         assert len(panel._window_widgets) == 3
         assert [list(widget[1].rows) for widget in panel._window_widgets.values()] == [keys[:2], [keys[2]], [keys[3]]]
-        combo = panel._window_widgets[0][0].findChild(QComboBox)
-        combo.setCurrentIndex(1)
-        yield from self._wait(.2)
+        yield from self._window_axis_mode(0, 'individual')
         assert panel._items[keys[0]].view_box is not panel._items[keys[1]].view_box
         assert panel._window_specs[1]['axis_mode'] == 'shared'
         window.btn_cursor1.setChecked(True)

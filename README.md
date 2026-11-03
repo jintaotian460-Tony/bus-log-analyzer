@@ -63,11 +63,14 @@ MDF and CSV content is detected automatically. Database Manager supports per-cha
 After decoding, click or drag Cursor 1 to inspect a recording. Its value columns,
 the Table and an open Trace follow that position. Drag the bottom ruler to pan
 the shared timeline or use the wheel to zoom down to 10 ms and finer intervals.
-The top area contains one status row with the project, recording time and gap
-information. Playback transport controls and the fixed 10 ms shortcut are removed.
+The top area contains one status row with the project and recording time.
+Playback transport controls, the fixed 10 ms shortcut and the header's gap controls
+are removed. To switch a window's Y axes, right-click a signal, its window title
+or the empty signal list and choose **此窗口 Y 轴 → 共轴 / 独立轴**. The window
+header has no permanent axis-mode selector.
 
-**Stale after** marks each plotted signal separately when it has had no update
-for longer than the selected timeout. Longer gaps have amber shading and broken
+**Stale after** in Project settings marks each plotted signal separately when it has
+had no update for longer than the configured timeout. Longer gaps have amber shading and broken
 curves; cursor values say **Stale** rather than presenting a held value as a new
 measurement. Before a signal's first sample they say **No data**. Zero disables
 gap marking. Raw measurements and exported samples are unchanged. The supplied

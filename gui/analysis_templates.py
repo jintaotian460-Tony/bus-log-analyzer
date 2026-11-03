@@ -93,7 +93,6 @@ def apply(window, template):
     panel.events_action.setChecked(show_events)
     panel.events_action.blockSignals(blocked)
     panel.set_events(events)
-    window._playback_freshness(window.playback.clock.position)
     return True
 
 

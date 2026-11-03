@@ -27,7 +27,6 @@ QToolButton { background: #ededed; border: 1px solid transparent; padding: 0px 3
 QToolButton:hover { background: #dae5ef; border-color: #a2b6c9; }
 QToolButton#windowTitle { text-align: left; }
 QToolButton#windowTitle:checked { background: #cfdeec; color: #142b3d; border-color: #9eb7cd; }
-QComboBox { background: #ededed; color: #20252b; border: 1px solid #c3c6ca; padding: 0px 3px; }
 QTreeWidget { background: #f3f3f3; color: #20252b; border: none; outline: none; }
 QTreeWidget::item { min-height: 19px; border-bottom: 1px solid transparent; }
 QTreeWidget::item:selected { background: #d5e5f4; color: #172b3c; border-bottom-color: #98b5cf; }

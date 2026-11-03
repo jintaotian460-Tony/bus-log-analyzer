@@ -3,9 +3,9 @@ from copy import deepcopy
 
 import pyqtgraph as pg
 from PySide6.QtCore import Qt, QRectF, QMimeData, QPoint, QPointF, QTimer
-from PySide6.QtGui import QColor, QBrush, QDrag, QPainter, QPen
+from PySide6.QtGui import QActionGroup, QColor, QBrush, QDrag, QPainter, QPen
 from PySide6.QtWidgets import (QWidget, QVBoxLayout, QHBoxLayout, QToolButton,
-                              QComboBox, QTreeWidget, QTreeWidgetItem,
+                              QTreeWidget, QTreeWidgetItem,
                               QGraphicsProxyWidget, QGraphicsWidget, QMenu, QInputDialog,
                               QAbstractItemView, QHeaderView, QSizePolicy)
 
@@ -153,24 +153,30 @@ class WindowSignals(QTreeWidget):
             QTimer.singleShot(0, self.panel, self.panel.redraw)
 
     def menu(self, position):
+        panel, window_id = self.panel, self.window['id']
+        global_position = self.viewport().mapToGlobal(position)
+        activate(panel, window_id)
         item = self.itemAt(position)
         if item is None:
+            QTimer.singleShot(0, panel, lambda: show_window_menu(panel, window_id, global_position))
             return
         item.setSelected(True)
         self.select()
-        keys = self.panel.selected_keys()
-        global_position = self.viewport().mapToGlobal(position)
+        keys = panel.selected_keys()
         key = item.data(0, Qt.ItemDataRole.UserRole)
-        if self.panel._items[key].unavailable_reason:
-            panel = self.panel
+        if panel._items[key].unavailable_reason:
             def open_menu():
                 menu = QMenu(panel)
+                add_axis_mode_menu(panel, menu, window_id)
+                menu.addSeparator()
                 menu.addAction('匹配到本日志信号…', lambda: panel.signalMatchRequested.emit(key))
                 menu.addAction('移除此曲线', lambda: panel.remove_series(key))
                 menu.exec(global_position)
+                menu.deleteLater()
             QTimer.singleShot(0, panel, open_menu)
             return
-        QTimer.singleShot(0, self.panel, lambda: self.panel._show_signal_menu(keys, global_position))
+        QTimer.singleShot(0, panel, lambda: panel._show_signal_menu(
+            keys, global_position, window_id=window_id))
 
     def startDrag(self, actions):
         mime = QMimeData()
@@ -298,6 +304,67 @@ def move_window(panel, window, direction):
         panel.redraw()
 
 
+def change_axis_mode(panel, window_id, mode):
+    if not panel._windows_mode or mode not in ('shared', 'individual'):
+        return False
+    window = next((spec for spec in panel._window_specs if spec['id'] == window_id), None)
+    if window is None or window['axis_mode'] == mode:
+        return False
+    panel._push_undo()
+    window['axis_mode'] = mode
+    panel._window_y_restore = {}
+
+    def redraw():
+        if not panel._windows_mode or not any(spec['id'] == window_id for spec in panel._window_specs):
+            return
+        panel._rebuild_curves(preserve_selection=True, preserve_y_range=False)
+        panel.fit_vertical()
+
+    # The rebuild removes the proxy that opened the menu; let its event return first.
+    QTimer.singleShot(0, panel, redraw)
+    return True
+
+
+def add_axis_mode_menu(panel, menu, window_id):
+    window = next((spec for spec in panel._window_specs if spec['id'] == window_id), None)
+    if not panel._windows_mode or window is None:
+        return
+    submenu = menu.addMenu('此窗口 Y 轴')
+    submenu.setObjectName('windowAxisModeMenu')
+    group = QActionGroup(submenu)
+    group.setExclusive(True)
+    for label, mode in (('共轴', 'shared'), ('独立轴', 'individual')):
+        action = submenu.addAction(label)
+        action.setData(mode)
+        action.setCheckable(True)
+        action.setChecked(window['axis_mode'] == mode)
+        group.addAction(action)
+        action.triggered.connect(
+            lambda _checked=False, target=window_id, value=mode:
+            change_axis_mode(panel, target, value))
+
+
+def show_window_menu(panel, window_id, global_position):
+    window = next((spec for spec in panel._window_specs if spec['id'] == window_id), None)
+    if not panel._windows_mode or window is None:
+        return
+    menu = QMenu(panel)
+    add_axis_mode_menu(panel, menu, window_id)
+    menu.addSeparator()
+
+    def rename():
+        name, ok = QInputDialog.getText(panel, '窗口名称', '名称', text=window['name'])
+        if ok and name.strip():
+            window['name'] = name.strip()
+            widget = panel._window_widgets.get(window_id)
+            if widget is not None:
+                widget[2].setText(window['name'])
+
+    menu.addAction('重命名窗口…', rename)
+    menu.exec(global_position)
+    menu.deleteLater()
+
+
 def make_list(panel, window, keys, row, last=False):
     widget = QWidget()
     widget.setObjectName('observationLegend')
@@ -318,21 +385,14 @@ def make_list(panel, window, keys, row, last=False):
     title.setChecked(window['id'] == panel._window_active_id)
     title.clicked.connect(lambda: activate(panel, window['id']))
     title.setContextMenuPolicy(Qt.ContextMenuPolicy.CustomContextMenu)
-    def rename(_position):
-        name, ok = QInputDialog.getText(widget, '窗口名称', '名称', text=window['name'])
-        if ok and name.strip():
-            window['name'] = name.strip()
-            title.setText(window['name'])
-    title.customContextMenuRequested.connect(rename)
-    title.setToolTip('点击设为添加信号的目标窗口；右键重命名')
+    def open_menu(position):
+        window_id = window['id']
+        global_position = title.mapToGlobal(position)
+        activate(panel, window_id)
+        QTimer.singleShot(0, panel, lambda: show_window_menu(panel, window_id, global_position))
+    title.customContextMenuRequested.connect(open_menu)
+    title.setToolTip('点击设为添加信号的目标窗口；右键选择共轴 / 独立轴或重命名')
     toolbar.addWidget(title, 1)
-    axis_mode = QComboBox()
-    axis_mode.addItem('共轴', 'shared')
-    axis_mode.addItem('独立轴', 'individual')
-    axis_mode.setToolTip('此窗口内所有信号共用 Y 轴，或每条信号使用独立 Y 轴')
-    axis_mode.setFixedSize(74, 21)
-    axis_mode.setCurrentIndex(1 if window['axis_mode'] == 'individual' else 0)
-    toolbar.addWidget(axis_mode)
     for text, tip, action in [('↑', '上移窗口', lambda: move_window(panel, window, -1)),
                               ('↓', '下移窗口', lambda: move_window(panel, window, 1)),
                               ('×', '关闭此窗口及其曲线', lambda: close_window(panel, window))]:
@@ -343,17 +403,6 @@ def make_list(panel, window, keys, row, last=False):
         button.clicked.connect(lambda _checked=False, action=action: QTimer.singleShot(0, panel, action))
         toolbar.addWidget(button)
     layout.addLayout(toolbar)
-    def change_mode():
-        panel._push_undo()
-        window['axis_mode'] = axis_mode.currentData()
-        panel._window_y_restore = {}
-        def redraw():
-            panel._rebuild_curves(preserve_selection=True, preserve_y_range=False)
-            panel.fit_vertical()
-        # Rebuilding removes this proxy widget. Wait until Qt has returned
-        # from the combo/list event before disposing its sender.
-        QTimer.singleShot(0, panel, redraw)
-    axis_mode.currentIndexChanged.connect(change_mode)
     tree = WindowSignals(panel, window)
     tree.setFrameShape(QTreeWidget.Shape.NoFrame)
     tree.setMinimumHeight(0)

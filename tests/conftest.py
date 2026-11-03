@@ -445,6 +445,12 @@ def qapp():
         pytest.skip("No Qt platform plugin available — skipping GUI test")
     from PySide6.QtWidgets import QApplication
     app = QApplication.instance() or QApplication(sys.argv[:1])
+    # No test runs app.exec(). With quit-on-last-window on, closing a busy
+    # MainWindow (MainWindow.closeEvent calls QApplication.exit(0) behind
+    # that very guard) puts the session app into its quitting state, and
+    # every later nested loop — QMenu.exec above all — returns at once.
+    # Nothing in the suite relies on quitting when windows close.
+    app.setQuitOnLastWindowClosed(False)
     yield app
     # Do not quit() the app here — session-scoped, tests may still hold refs.
 

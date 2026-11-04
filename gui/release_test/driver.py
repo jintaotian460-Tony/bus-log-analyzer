@@ -515,13 +515,13 @@ class ScenarioDriver(QObject):
         from PySide6.QtWidgets import QMenu
         from PySide6.QtTest import QTest
         panel = self._window.plot_panel
-        _widget, tree, title = panel._window_widgets[window_id]
+        _widget, tree = panel._window_widgets[window_id]
         if tree.rows:
             position = tree.visualItemRect(next(iter(tree.rows.values()))).center()
             QTimer.singleShot(0, panel, lambda: tree.menu(position))
         else:
-            position = title.rect().center()
-            QTimer.singleShot(0, panel, lambda: title.customContextMenuRequested.emit(position))
+            position = tree.header().rect().center()
+            QTimer.singleShot(0, panel, lambda: tree.header().customContextMenuRequested.emit(position))
         deadline = time.monotonic() + 3
         popup = None
         while time.monotonic() < deadline:
@@ -554,11 +554,44 @@ class ScenarioDriver(QObject):
         yield from self._wait(.3)
         assert next(spec for spec in panel._window_specs if spec['id'] == window_id)['axis_mode'] == mode
 
+    def _window_menu_action(self, window_id, label):
+        from PySide6.QtCore import Qt, QTimer
+        from PySide6.QtWidgets import QMenu
+        from PySide6.QtTest import QTest
+        panel = self._window.plot_panel
+        tree = panel._window_widgets[window_id][1]
+        position = tree.header().rect().center()
+        QTimer.singleShot(0, panel, lambda: tree.header().customContextMenuRequested.emit(position))
+        deadline = time.monotonic() + 3
+        popup = None
+        while time.monotonic() < deadline:
+            popup = next((menu for menu in panel.findChildren(QMenu)
+                          if menu.isVisible() and any(action.text() == label
+                                                      for action in menu.actions())), None)
+            if popup is not None:
+                break
+            yield
+        assert popup is not None, f'Window context menu did not offer {label}'
+        try:
+            window = next(spec for spec in panel._window_specs if spec['id'] == window_id)
+            name = popup.actions()[0]
+            assert name.text() == window['name']
+            assert not name.isEnabled() and popup.actionGeometry(name).height() > 0
+            action = next(action for action in popup.actions() if action.text() == label)
+            assert action.isEnabled()
+            screenshot = self._result_path.with_suffix('.window-menu.png')
+            assert popup.grab().save(str(screenshot))
+            QTest.mouseClick(popup, Qt.MouseButton.LeftButton,
+                             pos=popup.actionGeometry(action).center())
+        finally:
+            popup.close()
+        yield from self._wait(.3)
+
     def _observation_style(self, step: dict, record: dict):
         """Render actual recording data and exercise the compact local legends."""
         from PySide6.QtCore import Qt, QPoint, QPointF, QEvent
         from PySide6.QtGui import QMouseEvent
-        from PySide6.QtWidgets import QComboBox
+        from PySide6.QtWidgets import QComboBox, QToolButton
         from PySide6.QtTest import QTest
         from gui import observation_style
         window, panel = self._window, self._window.plot_panel
@@ -596,10 +629,13 @@ class ScenarioDriver(QObject):
         assert window.playback.gap_timeout.isHidden()
         assert window.playback.height() <= max(window.playback.time_label.sizeHint().height(),
                                                 window.playback.time_mode.sizeHint().height())+8
-        assert all(not widget.findChildren(QComboBox)
-                   for widget, _tree, _title in panel._window_widgets.values())
+        for widget, tree in panel._window_widgets.values():
+            assert not widget.findChildren(QComboBox)
+            assert not widget.findChildren(QToolButton)
+            assert tree.geometry().topLeft() == QPoint(0, 0)
+            assert tree.size() == widget.size()
         original = {key: item.series for key, item in panel._items.items()}
-        for _widget, tree, _title in panel._window_widgets.values():
+        for _widget, tree in panel._window_widgets.values():
             assert not tree.isColumnHidden(1) and not tree.isColumnHidden(2)
             for key, item in tree.rows.items():
                 assert item.foreground(0).color().name() == observation_style.TEXT
@@ -621,7 +657,7 @@ class ScenarioDriver(QObject):
         yield from self._wait(.2)
         assert panel.v_line.value() > 35.01
         assert all(abs(line.value()-panel.v_line.value()) < 1e-6 for line in panel._stacked_c1_lines)
-        widget, tree, _title = panel._window_widgets[panel._window_specs[0]['id']]
+        widget, tree = panel._window_widgets[panel._window_specs[0]['id']]
         first_key = next(iter(tree.rows))
         tree.rows[first_key].setCheckState(0, Qt.CheckState.Unchecked)
         yield from self._wait(.2)
@@ -642,6 +678,7 @@ class ScenarioDriver(QObject):
         record.update(outcome='passed', signals=len(original), local_legends=True,
                       compact_header=True, transport_controls_removed=True, fixed_tick_button_removed=True,
                       gap_header_removed=True, window_axis_context_menu=True, axis_header_removed=True,
+                      window_toolbar_removed=True, window_operations_context_menu=True,
                       cursor_handle_drag=True, cursor_values=True, visibility_toggle=True,
                       independent_axes=True, background_switch=True, original_data=True,
                       screenshot=screenshot, independent_screenshot=independent, light_screenshot=light)
@@ -676,10 +713,10 @@ class ScenarioDriver(QObject):
         yield from self._wait(.2)
         assert window.center_splitter.sizes()[0] == 0
         assert window.center_splitter.widget(1).geometry().left() == 0
-        listed = [key for _widget, tree, _title in panel._window_widgets.values()
+        listed = [key for _widget, tree in panel._window_widgets.values()
                   for key in tree.rows]
         assert sorted(listed) == sorted(panel.plotted_keys())
-        for _widget, tree, _title in panel._window_widgets.values():
+        for _widget, tree in panel._window_widgets.values():
             for key, item in tree.rows.items():
                 assert item.text(1) == panel.table.item(panel._row_lookup[key], 2).text()
         screenshot = str(self._result_path.with_suffix('.window-lists-only.png'))
@@ -1008,7 +1045,6 @@ class ScenarioDriver(QObject):
         from PySide6.QtCore import Qt, QPointF, QEvent
         from PySide6.QtGui import QMouseEvent
         from PySide6.QtTest import QTest
-        from PySide6.QtWidgets import QToolButton
         from core.project_config import save_project, load_project
         from gui import analysis_templates, plot_windows
         window = self._window
@@ -1048,7 +1084,7 @@ class ScenarioDriver(QObject):
         panel._stacked_c2_lines[0].setPos(13)
         assert all(abs(line.value()-12) < 1e-8 for line in panel._stacked_c1_lines)
         assert all(abs(line.value()-13) < 1e-8 for line in panel._stacked_c2_lines)
-        assert all(tree.rows[key].text(1) for _widget, tree, _title in panel._window_widgets.values() for key in tree.rows)
+        assert all(tree.rows[key].text(1) for _widget, tree in panel._window_widgets.values() for key in tree.rows)
         scrollbar = panel._stacked_scroll.verticalScrollBar()
         scrollbar.setValue(scrollbar.maximum())
         yield from self._wait(.2)
@@ -1073,11 +1109,22 @@ class ScenarioDriver(QObject):
             'viewport': panel._stacked_scroll.viewport().size().toTuple(),
             'drag_start': getattr(grip, 'heights', None),
         }
-        third = panel._window_widgets[2][0]
-        up = next(button for button in third.findChildren(QToolButton) if button.text() == '↑')
-        QTest.mouseClick(up, Qt.MouseButton.LeftButton)
-        yield from self._wait(.3)
+        yield from self._window_menu_action(2, '上移窗口')
         assert panel._window_specs[1]['id'] == 2
+        yield from self._window_menu_action(2, '下移窗口')
+        assert panel._window_specs[-1]['id'] == 2
+        yield from self._window_menu_action(2, '设为添加信号的目标窗口')
+        assert panel._window_active_id == 2
+        yield from self._window_menu_action(2, '关闭此窗口及其曲线')
+        assert keys[3] not in panel.plotted_keys()
+        assert len(panel._window_specs) == 2
+        panel.undo()
+        yield from self._wait(.3)
+        assert panel._items[keys[3]].window_id == 2
+        yield from self._window_menu_action(2, '上移窗口')
+        assert panel._window_specs[1]['id'] == 2
+        record['window_operations_context_menu'] = True
+        record['window_close_undo'] = True
         profile = self._result_path.with_suffix('.project.json')
         other_profile = self._result_path.with_suffix('.other-project.json')
         save_project(profile, {'name': 'Native analysis project'}, {'channels': {}}, {})

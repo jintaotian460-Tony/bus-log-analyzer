@@ -5,7 +5,12 @@ a light signal legend beside each plot, a shared time ruler and linked cursors.
 Only this area is styled; loading, decoding, project configuration and the other
 application panels retain their existing behavior.
 
-- Each window has one header row: title, shared/individual Y axes, ordering and close.
+- Each local signal list starts with **信号 / C1 / C2**, without a separate window
+  title or up/down/close button row. The window name appears only in its right-click
+  menu. Right-click a signal, the list header, empty list space or its plot to choose
+  the target for new signals, rename, reorder, close, or switch shared/individual
+  Y axes. Closing removes that window's plotted curves, not source measurements;
+  Ctrl+Z restores the window and its curves.
 - Signal names use dark text. A line sample beside each name identifies its color
   and line pattern, including bright yellow or white curves.
 - C1/C2 values are right aligned. Hover a name for its full identity and unit;

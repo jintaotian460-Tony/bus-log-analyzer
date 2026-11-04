@@ -13,7 +13,7 @@ import numpy as np
 import pytest
 from PySide6.QtCore import QPoint, Qt, QTimer
 from PySide6.QtTest import QTest
-from PySide6.QtWidgets import QApplication, QComboBox, QMenu
+from PySide6.QtWidgets import QComboBox, QInputDialog, QLineEdit, QMenu, QToolButton
 
 from core.signal_store import SignalSeries
 from gui.plot_widget import PlotPanel
@@ -70,9 +70,8 @@ def open_tree_menu(qapp, tree, position):
     qapp.processEvents()
 
 
-def open_title_menu(qapp, title, position):
-    """A title's menu the same way: its own signal, its connected handler."""
-    title.customContextMenuRequested.emit(position)
+def open_header_menu(qapp, tree):
+    tree.header().customContextMenuRequested.emit(tree.header().rect().center())
     qapp.processEvents()
 
 
@@ -152,6 +151,243 @@ def choose_axis_mode(panel, qapp, request, mode, *, current, while_open=None):
     assert outcome == [mode]
 
 
+def use_window_menu(panel, qapp, request, interact):
+    errors, outcome = [], []
+    timer = QTimer()
+    timer.setInterval(10)
+    deadline = QTimer()
+    deadline.setSingleShot(True)
+
+    def close_menus():
+        for menu in list(panel.findChildren(QMenu)):
+            menu.close()
+
+    def drive():
+        menu = window_axis_menu(panel)
+        if menu is None:
+            return
+        timer.stop()
+        try:
+            interact(menu)
+            outcome.append(True)
+        except Exception as error:
+            errors.append(error)
+        finally:
+            close_menus()
+
+    def timeout():
+        timer.stop()
+        errors.append(AssertionError('Window context menu did not open'))
+        close_menus()
+
+    timer.timeout.connect(drive)
+    deadline.timeout.connect(timeout)
+    timer.start()
+    deadline.start(3000)
+    try:
+        request()
+        while timer.isActive():
+            QTest.qWait(10)
+        settle(qapp)
+    finally:
+        timer.stop()
+        deadline.stop()
+        close_menus()
+    if errors:
+        raise errors[0]
+    assert outcome == [True]
+
+
+def click_menu_action(menu, label):
+    action = next(action for action in menu.actions() if action.text() == label)
+    assert action.isEnabled(), label
+    QTest.mouseClick(menu, Qt.MouseButton.LeftButton,
+                     pos=menu.actionGeometry(action).center())
+
+
+@pytest.mark.parametrize('surface,target', [
+    ('signal', 0), ('blank', 0), ('empty', 1), ('header', 1),
+    ('plot', 0), ('empty_plot', 1), ('unavailable', 0),
+])
+def test_window_operations_are_available_on_every_context_surface(windows, qapp, surface, target):
+    panel = windows
+    if surface == 'unavailable':
+        panel._items[panel.plotted_keys()[0]].unavailable_reason = '本日志未匹配'
+        panel.redraw()
+        settle(qapp)
+    plot_windows.activate(panel, 1 - target)
+
+    def request():
+        tree = panel._window_widgets[target][1]
+        if surface in ('plot', 'empty_plot'):
+            position = panel.glw.mapFromScene(panel._stacked_plots[target].vb.sceneBoundingRect().center())
+            QTest.mouseClick(panel.glw.viewport(), Qt.MouseButton.RightButton, pos=position)
+            qapp.processEvents()
+        elif surface == 'header':
+            open_header_menu(qapp, tree)
+        else:
+            position = (tree.visualItemRect(tree.topLevelItem(0)).center()
+                        if surface in ('signal', 'unavailable')
+                        else QPoint(20, tree.viewport().height() - 20))
+            open_tree_menu(qapp, tree, position)
+
+    def inspect(menu):
+        actions = {action.text(): action for action in menu.actions()}
+        name = actions[f'窗口 {target + 1}']
+        assert not name.isEnabled()
+        assert menu.actionGeometry(name).height() > 0
+        assert actions['设为添加信号的目标窗口'].isChecked()
+        assert actions['上移窗口'].isEnabled() == (target == 1)
+        assert actions['下移窗口'].isEnabled() == (target == 0)
+        assert actions['关闭此窗口及其曲线'].isEnabled()
+        assert actions['重命名窗口…'].isEnabled()
+
+    use_window_menu(panel, qapp, request, inspect)
+    assert panel._window_active_id == target
+    assert not panel._undo_stack
+
+
+def test_menu_window_moves_and_close_preserve_undo_and_signal_ownership(windows, qapp):
+    panel = windows
+    panel.new_window()
+    extra = SignalSeries(
+        channel=1, message_name='Message', message_id=1, signal_name='C', unit='V',
+        timestamps=np.array([0., 1.]), values=np.array([7., 8.]))
+    panel.add_series(extra.key, extra)
+    settle(qapp)
+    panel.discard_undo_history()
+    originals = {key: item.series for key, item in panel._items.items()}
+    layout = panel.window_layout()
+    layout[-1]['height'] = 350
+    panel.apply_window_layout(layout)
+    settle(qapp)
+
+    def choose(label):
+        tree = panel._window_widgets[2][1]
+        use_window_menu(panel, qapp, lambda: open_header_menu(qapp, tree),
+                        lambda menu: click_menu_action(menu, label))
+
+    choose('上移窗口')
+    assert [spec['id'] for spec in panel.window_layout()] == [0, 2, 1]
+    assert panel.window_layout()[1]['height'] == 350
+    assert panel._items[extra.key].window_id == 2
+    assert len(panel._undo_stack) == 1
+    panel.undo()
+    settle(qapp)
+    assert [spec['id'] for spec in panel.window_layout()] == [0, 1, 2]
+
+    choose('上移窗口')
+    choose('下移窗口')
+    assert [spec['id'] for spec in panel.window_layout()] == [0, 1, 2]
+    panel.undo()
+    settle(qapp)
+    assert [spec['id'] for spec in panel.window_layout()] == [0, 2, 1]
+    assert all(panel._items[key].series is series for key, series in originals.items())
+
+    choose('关闭此窗口及其曲线')
+    assert extra.key not in panel.plotted_keys()
+    assert [spec['id'] for spec in panel.window_layout()] == [0, 1]
+    assert set(panel.plotted_keys()) == set(originals) - {extra.key}
+    panel.undo()
+    settle(qapp)
+    assert panel.window_layout()[1]['id'] == 2
+    assert panel.window_layout()[1]['height'] == 350
+    assert panel._items[extra.key].window_id == 2
+    assert all(panel._items[key].series is series for key, series in originals.items())
+
+
+def test_menu_target_routes_the_next_signal_to_the_clicked_window(windows, qapp):
+    panel = windows
+    tree = panel._window_widgets[0][1]
+
+    def select_target(menu):
+        plot_windows.activate(panel, 1)
+        click_menu_action(menu, '设为添加信号的目标窗口')
+
+    use_window_menu(panel, qapp, lambda: open_header_menu(qapp, tree), select_target)
+    added = SignalSeries(
+        channel=1, message_name='Message', message_id=1, signal_name='C', unit='V',
+        timestamps=np.array([0., 1.]), values=np.array([7., 8.]))
+    panel.add_series(added.key, added)
+    settle(qapp)
+    assert added.key in panel._window_widgets[0][1].rows
+    assert added.key not in panel._window_widgets[1][1].rows
+
+
+def test_rename_is_visible_in_the_next_menu_and_saved_layout(windows, qapp):
+    panel = windows
+    tree = panel._window_widgets[1][1]
+    errors, completed = [], []
+    timer = QTimer()
+    timer.setInterval(10)
+
+    def enter_name():
+        dialog = next((dialog for dialog in panel.findChildren(QInputDialog)
+                       if dialog.isVisible()), None)
+        if dialog is None:
+            return
+        timer.stop()
+        try:
+            edit = dialog.findChild(QLineEdit)
+            assert edit is not None
+            edit.selectAll()
+            QTest.keyClicks(edit, 'Comfort')
+            QTest.keyClick(edit, Qt.Key.Key_Return)
+            completed.append(True)
+        except Exception as error:
+            errors.append(error)
+            dialog.reject()
+
+    def rename(menu):
+        timer.start()
+        QTimer.singleShot(1500, panel, lambda: [dialog.reject()
+                          for dialog in panel.findChildren(QInputDialog) if dialog.isVisible()])
+        click_menu_action(menu, '重命名窗口…')
+
+    timer.timeout.connect(enter_name)
+    try:
+        use_window_menu(panel, qapp, lambda: open_header_menu(qapp, tree), rename)
+    finally:
+        timer.stop()
+    assert not errors, errors
+    assert completed == [True]
+    assert panel.window_layout()[1]['name'] == 'Comfort'
+
+    def inspect(menu):
+        assert 'Comfort' in [action.text() for action in menu.actions()]
+
+    use_window_menu(panel, qapp, lambda: open_header_menu(qapp, tree), inspect)
+    panel.apply_window_layout(panel.window_layout())
+    settle(qapp)
+    tree = panel._window_widgets[1][1]
+    use_window_menu(panel, qapp, lambda: open_header_menu(qapp, tree), inspect)
+
+
+def test_closing_the_last_window_from_its_menu_keeps_a_usable_empty_list(windows, qapp):
+    panel = windows
+    layout = panel.window_layout()[:1]
+    panel.apply_window_layout(layout)
+    settle(qapp)
+    panel.discard_undo_history()
+    keys = panel.plotted_keys()
+    tree = panel._window_widgets[0][1]
+    use_window_menu(panel, qapp, lambda: open_header_menu(qapp, tree),
+                    lambda menu: click_menu_action(menu, '关闭此窗口及其曲线'))
+    assert panel.plotted_keys() == []
+    assert len(panel.window_layout()) == 1
+    tree = panel._window_widgets[panel.window_layout()[0]['id']][1]
+    def inspect_empty(menu):
+        actions = {action.text(): action for action in menu.actions()}
+        assert not actions['上移窗口'].isEnabled()
+        assert not actions['下移窗口'].isEnabled()
+        assert actions['设为添加信号的目标窗口'].isChecked()
+
+    use_window_menu(panel, qapp, lambda: open_header_menu(qapp, tree), inspect_empty)
+    panel.undo()
+    settle(qapp)
+    assert panel.plotted_keys() == keys
+
+
 def test_signal_right_click_switches_only_its_window_and_keeps_data(windows, qapp):
     panel = windows
     keys = panel.plotted_keys()
@@ -184,7 +420,7 @@ def test_signal_right_click_switches_only_its_window_and_keeps_data(windows, qap
     assert [spec['axis_mode'] for spec in panel._window_specs] == ['shared', 'shared']
 
 
-def test_window_headers_have_no_axis_combobox_after_rebuild_and_restore(windows, qapp):
+def test_signal_lists_start_at_the_top_without_permanent_window_controls(windows, qapp):
     panel = windows
     layout = panel.window_layout()
     layout[0]['axis_mode'] = 'individual'
@@ -192,23 +428,25 @@ def test_window_headers_have_no_axis_combobox_after_rebuild_and_restore(windows,
     panel.resize(1100, 700)
     settle(qapp)
     assert panel.window_layout()[0]['axis_mode'] == 'individual'
-    for widget, tree, title in panel._window_widgets.values():
+    for widget, tree in panel._window_widgets.values():
         assert not widget.findChildren(QComboBox)
-        assert title.width() > 250
-        assert tree.width() == widget.width()
+        assert not widget.findChildren(QToolButton)
+        assert tree.geometry().topLeft() == QPoint(0, 0)
+        assert tree.size() == widget.size()
+        assert [tree.headerItem().text(column) for column in range(3)] == ['信号', 'C1', 'C2']
 
 
 @pytest.mark.parametrize('surface,target', [
-    ('blank', 0), ('empty', 1), ('title', 1), ('plot', 1),
+    ('blank', 0), ('empty', 1), ('header', 1), ('plot', 1),
 ])
 def test_axis_menu_is_available_without_a_signal_at_the_click(windows, qapp, surface, target):
     panel = windows
     plot_windows.activate(panel, 1 - target)
 
     def request():
-        _widget, tree, title = panel._window_widgets[target]
-        if surface == 'title':
-            open_title_menu(qapp, title, title.rect().center())
+        _widget, tree = panel._window_widgets[target]
+        if surface == 'header':
+            open_header_menu(qapp, tree)
         elif surface == 'plot':
             index = next(i for i, spec in enumerate(panel._window_specs)
                          if spec['id'] == target)
@@ -229,9 +467,9 @@ def test_axis_menu_is_available_without_a_signal_at_the_click(windows, qapp, sur
 
 def test_current_mode_is_a_noop_and_menu_target_survives_reordering(windows, qapp):
     panel = windows
-    target = panel._window_widgets[0][2]
+    target = panel._window_widgets[0][1]
     choose_axis_mode(panel, qapp,
-                     lambda: open_title_menu(qapp, target, target.rect().center()),
+                     lambda: open_header_menu(qapp, target),
                      '共轴', current='共轴')
     assert not panel._undo_stack
 
@@ -240,7 +478,7 @@ def test_current_mode_is_a_noop_and_menu_target_survives_reordering(windows, qap
         plot_windows.activate(panel, 1)
 
     choose_axis_mode(panel, qapp,
-                     lambda: open_title_menu(qapp, target, target.rect().center()),
+                     lambda: open_header_menu(qapp, target),
                      '独立轴', current='共轴', while_open=reorder)
     assert [(spec['id'], spec['axis_mode']) for spec in panel._window_specs] == [
         (1, 'shared'), (0, 'individual')]

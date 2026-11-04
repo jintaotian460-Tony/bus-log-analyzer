@@ -1423,7 +1423,7 @@ class PlotPanel(QWidget):
         if self._windows_mode:
             # The left lists are proxy widgets in the same GraphicsView.
             # A view-level drop can reach us before QTreeWidget.dropEvent.
-            for identifier, (widget, _tree, _title) in self._window_widgets.items():
+            for identifier, (widget, _tree) in self._window_widgets.items():
                 proxy = widget.graphicsProxyWidget()
                 if proxy is not None and proxy.sceneBoundingRect().contains(scene_pos):
                     return identifier
@@ -5318,7 +5318,7 @@ class PlotPanel(QWidget):
         *time_s*, the time under a right-click on a plot, offers a marker there."""
         menu = self._make_menu()
         if self._windows_mode and window_id is not None:
-            plot_windows.add_axis_mode_menu(self, menu, window_id)
+            plot_windows.add_window_actions(self, menu, window_id)
             menu.addSeparator()
         has_sel   = bool(selected_keys)
         has_one   = len(selected_keys) == 1

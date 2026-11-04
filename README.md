@@ -65,9 +65,11 @@ the Table and an open Trace follow that position. Drag the bottom ruler to pan
 the shared timeline or use the wheel to zoom down to 10 ms and finer intervals.
 The top area contains one status row with the project and recording time.
 Playback transport controls, the fixed 10 ms shortcut and the header's gap controls
-are removed. To switch a window's Y axes, right-click a signal, its window title
-or the empty signal list and choose **此窗口 Y 轴 → 共轴 / 独立轴**. The window
-header has no permanent axis-mode selector.
+are removed. The local signal list starts directly with **信号 / C1 / C2**;
+there is no separate window title or permanent up/down/close button row.
+Right-click a signal, the list header, empty list space or its plot to see the
+window name, select it as the target for added signals, rename, reorder or close
+it. The same menu offers **此窗口 Y 轴 → 共轴 / 独立轴**.
 
 **Stale after** in Project settings marks each plotted signal separately when it has
 had no update for longer than the configured timeout. Longer gaps have amber shading and broken

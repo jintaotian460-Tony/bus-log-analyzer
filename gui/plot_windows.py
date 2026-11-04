@@ -4,10 +4,9 @@ from copy import deepcopy
 import pyqtgraph as pg
 from PySide6.QtCore import Qt, QRectF, QMimeData, QPoint, QPointF, QTimer
 from PySide6.QtGui import QActionGroup, QColor, QBrush, QDrag, QPainter, QPen
-from PySide6.QtWidgets import (QWidget, QVBoxLayout, QHBoxLayout, QToolButton,
-                              QTreeWidget, QTreeWidgetItem,
+from PySide6.QtWidgets import (QWidget, QVBoxLayout, QTreeWidget, QTreeWidgetItem,
                               QGraphicsProxyWidget, QGraphicsWidget, QMenu, QInputDialog,
-                              QAbstractItemView, QHeaderView, QSizePolicy)
+                              QAbstractItemView, QHeaderView)
 
 from gui.signal_tree import SignalTreeWidget
 from gui.edge_tab import EdgeTab
@@ -123,7 +122,7 @@ class WindowSignals(QTreeWidget):
         self.panel, self.window = panel, window
         self.setColumnCount(3)
         self.setHeaderLabels(['信号', 'C1', 'C2'])
-        self.setToolTip('按住信号名称拖到另一窗口的列表或绘图区，可移动信号；Ctrl/Shift 多选后可一起拖动。Ctrl+Z 撤销。右键调整样式。')
+        self.setToolTip('按住信号名称拖到另一窗口的列表或绘图区，可移动信号；Ctrl/Shift 多选后可一起拖动。Ctrl+Z 撤销。右键管理窗口及调整信号样式。')
         self.header().setStretchLastSection(False)
         self.header().setSectionResizeMode(0, QHeaderView.ResizeMode.Stretch)
         for column in (1, 2):
@@ -135,6 +134,8 @@ class WindowSignals(QTreeWidget):
         self.setAcceptDrops(True)
         self.setContextMenuPolicy(Qt.ContextMenuPolicy.CustomContextMenu)
         self.customContextMenuRequested.connect(self.menu)
+        self.header().setContextMenuPolicy(Qt.ContextMenuPolicy.CustomContextMenu)
+        self.header().customContextMenuRequested.connect(self.header_menu)
         self.itemSelectionChanged.connect(self.select)
         self.itemChanged.connect(self.changed)
         self.rows = {}
@@ -152,6 +153,12 @@ class WindowSignals(QTreeWidget):
             self.panel._items[key].visible = item.checkState(0) == Qt.CheckState.Checked
             QTimer.singleShot(0, self.panel, self.panel.redraw)
 
+    def header_menu(self, position):
+        panel, window_id = self.panel, self.window['id']
+        global_position = self.header().mapToGlobal(position)
+        activate(panel, window_id)
+        QTimer.singleShot(0, panel, lambda: show_window_menu(panel, window_id, global_position))
+
     def menu(self, position):
         panel, window_id = self.panel, self.window['id']
         global_position = self.viewport().mapToGlobal(position)
@@ -167,7 +174,7 @@ class WindowSignals(QTreeWidget):
         if panel._items[key].unavailable_reason:
             def open_menu():
                 menu = QMenu(panel)
-                add_axis_mode_menu(panel, menu, window_id)
+                add_window_actions(panel, menu, window_id)
                 menu.addSeparator()
                 menu.addAction('匹配到本日志信号…', lambda: panel.signalMatchRequested.emit(key))
                 menu.addAction('移除此曲线', lambda: panel.remove_series(key))
@@ -273,8 +280,6 @@ def ensure(panel):
 
 def activate(panel, window_id):
     panel._window_active_id = window_id
-    for identifier, (widget, _tree, title) in panel._window_widgets.items():
-        title.setChecked(identifier == window_id)
 
 
 def add_window(panel):
@@ -344,23 +349,41 @@ def add_axis_mode_menu(panel, menu, window_id):
             change_axis_mode(panel, target, value))
 
 
-def show_window_menu(panel, window_id, global_position):
+def add_window_actions(panel, menu, window_id):
     window = next((spec for spec in panel._window_specs if spec['id'] == window_id), None)
     if not panel._windows_mode or window is None:
         return
-    menu = QMenu(panel)
-    add_axis_mode_menu(panel, menu, window_id)
+    name = menu.addAction(window['name'])
+    name.setEnabled(False)
     menu.addSeparator()
+    target = menu.addAction('设为添加信号的目标窗口')
+    target.setCheckable(True)
+    target.setChecked(window_id == panel._window_active_id)
+    target.triggered.connect(lambda: activate(panel, window_id))
+    add_axis_mode_menu(panel, menu, window_id)
 
     def rename():
         name, ok = QInputDialog.getText(panel, '窗口名称', '名称', text=window['name'])
         if ok and name.strip():
             window['name'] = name.strip()
-            widget = panel._window_widgets.get(window_id)
-            if widget is not None:
-                widget[2].setText(window['name'])
 
     menu.addAction('重命名窗口…', rename)
+    index = panel._window_specs.index(window)
+    for label, direction in (('上移窗口', -1), ('下移窗口', 1)):
+        action = menu.addAction(label)
+        action.setEnabled(0 <= index + direction < len(panel._window_specs))
+        action.triggered.connect(
+            lambda _checked=False, step=direction:
+            QTimer.singleShot(0, panel, lambda: move_window(panel, window, step)))
+    close = menu.addAction('关闭此窗口及其曲线')
+    close.triggered.connect(lambda: QTimer.singleShot(0, panel, lambda: close_window(panel, window)))
+
+
+def show_window_menu(panel, window_id, global_position):
+    if not panel._windows_mode or not any(spec['id'] == window_id for spec in panel._window_specs):
+        return
+    menu = QMenu(panel)
+    add_window_actions(panel, menu, window_id)
     menu.exec(global_position)
     menu.deleteLater()
 
@@ -372,37 +395,6 @@ def make_list(panel, window, keys, row, last=False):
     layout = QVBoxLayout(widget)
     layout.setContentsMargins(0, 0, 0, 0)
     layout.setSpacing(0)
-    toolbar = QHBoxLayout()
-    toolbar.setContentsMargins(2, 1, 2, 1)
-    toolbar.setSpacing(2)
-    title = QToolButton()
-    title.setObjectName('windowTitle')
-    title.setMinimumWidth(0)
-    title.setSizePolicy(QSizePolicy.Policy.Ignored, QSizePolicy.Policy.Fixed)
-    title.setFixedHeight(21)
-    title.setText(window['name'])
-    title.setCheckable(True)
-    title.setChecked(window['id'] == panel._window_active_id)
-    title.clicked.connect(lambda: activate(panel, window['id']))
-    title.setContextMenuPolicy(Qt.ContextMenuPolicy.CustomContextMenu)
-    def open_menu(position):
-        window_id = window['id']
-        global_position = title.mapToGlobal(position)
-        activate(panel, window_id)
-        QTimer.singleShot(0, panel, lambda: show_window_menu(panel, window_id, global_position))
-    title.customContextMenuRequested.connect(open_menu)
-    title.setToolTip('点击设为添加信号的目标窗口；右键选择共轴 / 独立轴或重命名')
-    toolbar.addWidget(title, 1)
-    for text, tip, action in [('↑', '上移窗口', lambda: move_window(panel, window, -1)),
-                              ('↓', '下移窗口', lambda: move_window(panel, window, 1)),
-                              ('×', '关闭此窗口及其曲线', lambda: close_window(panel, window))]:
-        button = QToolButton()
-        button.setText(text)
-        button.setFixedSize(19, 21)
-        button.setToolTip(tip)
-        button.clicked.connect(lambda _checked=False, action=action: QTimer.singleShot(0, panel, action))
-        toolbar.addWidget(button)
-    layout.addLayout(toolbar)
     tree = WindowSignals(panel, window)
     tree.setFrameShape(QTreeWidget.Shape.NoFrame)
     tree.setMinimumHeight(0)
@@ -430,7 +422,7 @@ def make_list(panel, window, keys, row, last=False):
     # The last list spans its graph and the ruler's reserved row. It remains a
     # real, interactive tree all the way down to the cursor/file information.
     panel.glw.addItem(proxy, row=row, col=0, rowspan=2 if last else 1)
-    panel._window_widgets[window['id']] = (widget, tree, title)
+    panel._window_widgets[window['id']] = (widget, tree)
     panel.glw.ci.layout.setColumnFixedWidth(0, observation_style.LIST_WIDTH)
 
 
@@ -624,7 +616,7 @@ def arrange(panel):
 
 
 def refresh_values(panel):
-    for _widget, tree, _title in panel._window_widgets.values():
+    for _widget, tree in panel._window_widgets.values():
         tree.setColumnHidden(1, not panel._cursor1_enabled)
         tree.setColumnHidden(2, not panel._cursor2_enabled)
         for key, item in tree.rows.items():

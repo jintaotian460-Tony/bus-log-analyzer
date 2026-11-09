@@ -65,8 +65,9 @@ the Table and an open Trace follow that position. Drag the bottom ruler to pan
 the shared timeline or use the wheel to zoom down to 10 ms and finer intervals.
 The top area contains one status row with the project and recording time.
 Playback transport controls, the fixed 10 ms shortcut and the header's gap controls
-are removed. The local signal list starts directly with **信号 / C1 / C2**;
-there is no separate window title or permanent up/down/close button row.
+are removed. Only the top window shows the **信号 / C1 / C2** column header;
+all lower lists start directly with their signals to leave more room for rows.
+There is no separate window title or permanent up/down/close button row.
 Right-click a signal, the list header, empty list space or its plot to see the
 window name, select it as the target for added signals, rename, reorder or close
 it. The same menu offers **此窗口 Y 轴 → 共轴 / 独立轴**.

@@ -44,6 +44,65 @@ def test_each_window_has_its_own_list_and_one_source_of_data(windows, qapp):
     assert panel._stacked_row_keys == [[], [a.key, b.key]]
 
 
+@pytest.mark.parametrize('count', [1, 3, 6])
+def test_only_the_top_window_reserves_space_for_signal_column_headings(windows, qapp, count):
+    from PySide6.QtCore import QPoint
+    panel = windows
+    signals = [series(f'Signal_{index}') for index in range(count)]
+    for index, signal in enumerate(signals):
+        if index:
+            panel.new_window()
+        panel.add_series(signal.key, signal)
+    panel.set_cursor1_enabled(True)
+    panel.set_cursor2_enabled(True)
+    panel.move_cursor1(3)
+    panel.move_cursor2(4)
+    settle(qapp)
+    for index, spec in enumerate(panel.window_layout()):
+        tree = panel._window_widgets[spec['id']][1]
+        assert tree.isHeaderHidden() == (index > 0)
+        assert tree.header().isVisible() == (index == 0)
+        viewport_top = tree.viewport().mapTo(tree, QPoint()).y()
+        assert viewport_top == (tree.header().height() if index == 0 else 0)
+        item = tree.rows[signals[index].key]
+        assert tree.visualItemRect(item).top() == 0
+        assert item.text(1) == '30.000' and item.text(2) == '40.000'
+        assert panel._items[signals[index].key].series is signals[index]
+
+
+def test_single_signal_header_follows_window_order_close_undo_and_restore(windows, qapp):
+    panel = windows
+    for index in range(3):
+        if index:
+            panel.new_window()
+        signal = series(f'Signal_{index}')
+        panel.add_series(signal.key, signal)
+    settle(qapp)
+    originals = {key: item.series for key, item in panel._items.items()}
+
+    def check_top(identifier):
+        settle(qapp)
+        visible = [spec['id'] for spec in panel.window_layout()
+                   if panel._window_widgets[spec['id']][1].header().isVisible()]
+        assert visible == [identifier]
+
+    check_top(0)
+    plot_windows.move_window(panel, panel._window_specs[0], 1)
+    check_top(1)
+    saved = panel.window_layout()
+    plot_windows.close_window(panel, panel._window_specs[0])
+    check_top(0)
+    panel.undo()
+    check_top(1)
+    panel.apply_window_layout(saved)
+    panel.resize(1100, 700)
+    check_top(1)
+    assert all(panel._items[key].series is value for key, value in originals.items())
+    panel.set_stacked(True)
+    panel.set_windows(True)
+    check_top(1)
+
+
 def test_x_range_cursors_and_readouts_follow_in_both_directions(windows, qapp):
     panel = windows
     a, b = series('A'), series('B')

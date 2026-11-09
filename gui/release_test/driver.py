@@ -520,8 +520,8 @@ class ScenarioDriver(QObject):
             position = tree.visualItemRect(next(iter(tree.rows.values()))).center()
             QTimer.singleShot(0, panel, lambda: tree.menu(position))
         else:
-            position = tree.header().rect().center()
-            QTimer.singleShot(0, panel, lambda: tree.header().customContextMenuRequested.emit(position))
+            position = tree.viewport().rect().center()
+            QTimer.singleShot(0, panel, lambda: tree.menu(position))
         deadline = time.monotonic() + 3
         popup = None
         while time.monotonic() < deadline:
@@ -560,8 +560,8 @@ class ScenarioDriver(QObject):
         from PySide6.QtTest import QTest
         panel = self._window.plot_panel
         tree = panel._window_widgets[window_id][1]
-        position = tree.header().rect().center()
-        QTimer.singleShot(0, panel, lambda: tree.header().customContextMenuRequested.emit(position))
+        position = tree.viewport().rect().center()
+        QTimer.singleShot(0, panel, lambda: tree.menu(position))
         deadline = time.monotonic() + 3
         popup = None
         while time.monotonic() < deadline:
@@ -629,11 +629,15 @@ class ScenarioDriver(QObject):
         assert window.playback.gap_timeout.isHidden()
         assert window.playback.height() <= max(window.playback.time_label.sizeHint().height(),
                                                 window.playback.time_mode.sizeHint().height())+8
-        for widget, tree in panel._window_widgets.values():
+        for index, spec in enumerate(panel._window_specs):
+            widget, tree = panel._window_widgets[spec['id']]
             assert not widget.findChildren(QComboBox)
             assert not widget.findChildren(QToolButton)
             assert tree.geometry().topLeft() == QPoint(0, 0)
             assert tree.size() == widget.size()
+            assert tree.isHeaderHidden() == (index > 0)
+            assert tree.header().isVisible() == (index == 0)
+            assert tree.viewport().mapTo(tree, QPoint()).y() == (tree.header().height() if index == 0 else 0)
         original = {key: item.series for key, item in panel._items.items()}
         for _widget, tree in panel._window_widgets.values():
             assert not tree.isColumnHidden(1) and not tree.isColumnHidden(2)
@@ -679,6 +683,7 @@ class ScenarioDriver(QObject):
                       compact_header=True, transport_controls_removed=True, fixed_tick_button_removed=True,
                       gap_header_removed=True, window_axis_context_menu=True, axis_header_removed=True,
                       window_toolbar_removed=True, window_operations_context_menu=True,
+                      single_signal_header=True, repeated_signal_headers_removed=True,
                       cursor_handle_drag=True, cursor_values=True, visibility_toggle=True,
                       independent_axes=True, background_switch=True, original_data=True,
                       screenshot=screenshot, independent_screenshot=independent, light_screenshot=light)

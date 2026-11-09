@@ -71,8 +71,18 @@ def open_tree_menu(qapp, tree, position):
 
 
 def open_header_menu(qapp, tree):
+    assert tree.header().isVisible()
     tree.header().customContextMenuRequested.emit(tree.header().rect().center())
     qapp.processEvents()
+
+
+def open_window_menu(qapp, tree):
+    if tree.isHeaderHidden():
+        position = QPoint(20, tree.viewport().height() - 20)
+        assert tree.itemAt(position) is None
+        open_tree_menu(qapp, tree, position)
+    else:
+        open_header_menu(qapp, tree)
 
 
 def window_axis_menu(panel):
@@ -206,7 +216,7 @@ def click_menu_action(menu, label):
 
 
 @pytest.mark.parametrize('surface,target', [
-    ('signal', 0), ('blank', 0), ('empty', 1), ('header', 1),
+    ('signal', 0), ('blank', 0), ('empty', 1), ('header', 0),
     ('plot', 0), ('empty_plot', 1), ('unavailable', 0),
 ])
 def test_window_operations_are_available_on_every_context_surface(windows, qapp, surface, target):
@@ -264,7 +274,7 @@ def test_menu_window_moves_and_close_preserve_undo_and_signal_ownership(windows,
 
     def choose(label):
         tree = panel._window_widgets[2][1]
-        use_window_menu(panel, qapp, lambda: open_header_menu(qapp, tree),
+        use_window_menu(panel, qapp, lambda: open_window_menu(qapp, tree),
                         lambda menu: click_menu_action(menu, label))
 
     choose('上移窗口')
@@ -304,7 +314,7 @@ def test_menu_target_routes_the_next_signal_to_the_clicked_window(windows, qapp)
         plot_windows.activate(panel, 1)
         click_menu_action(menu, '设为添加信号的目标窗口')
 
-    use_window_menu(panel, qapp, lambda: open_header_menu(qapp, tree), select_target)
+    use_window_menu(panel, qapp, lambda: open_window_menu(qapp, tree), select_target)
     added = SignalSeries(
         channel=1, message_name='Message', message_id=1, signal_name='C', unit='V',
         timestamps=np.array([0., 1.]), values=np.array([7., 8.]))
@@ -346,7 +356,7 @@ def test_rename_is_visible_in_the_next_menu_and_saved_layout(windows, qapp):
 
     timer.timeout.connect(enter_name)
     try:
-        use_window_menu(panel, qapp, lambda: open_header_menu(qapp, tree), rename)
+        use_window_menu(panel, qapp, lambda: open_window_menu(qapp, tree), rename)
     finally:
         timer.stop()
     assert not errors, errors
@@ -356,11 +366,11 @@ def test_rename_is_visible_in_the_next_menu_and_saved_layout(windows, qapp):
     def inspect(menu):
         assert 'Comfort' in [action.text() for action in menu.actions()]
 
-    use_window_menu(panel, qapp, lambda: open_header_menu(qapp, tree), inspect)
+    use_window_menu(panel, qapp, lambda: open_window_menu(qapp, tree), inspect)
     panel.apply_window_layout(panel.window_layout())
     settle(qapp)
     tree = panel._window_widgets[1][1]
-    use_window_menu(panel, qapp, lambda: open_header_menu(qapp, tree), inspect)
+    use_window_menu(panel, qapp, lambda: open_window_menu(qapp, tree), inspect)
 
 
 def test_closing_the_last_window_from_its_menu_keeps_a_usable_empty_list(windows, qapp):
@@ -371,7 +381,7 @@ def test_closing_the_last_window_from_its_menu_keeps_a_usable_empty_list(windows
     panel.discard_undo_history()
     keys = panel.plotted_keys()
     tree = panel._window_widgets[0][1]
-    use_window_menu(panel, qapp, lambda: open_header_menu(qapp, tree),
+    use_window_menu(panel, qapp, lambda: open_window_menu(qapp, tree),
                     lambda menu: click_menu_action(menu, '关闭此窗口及其曲线'))
     assert panel.plotted_keys() == []
     assert len(panel.window_layout()) == 1
@@ -382,7 +392,7 @@ def test_closing_the_last_window_from_its_menu_keeps_a_usable_empty_list(windows
         assert not actions['下移窗口'].isEnabled()
         assert actions['设为添加信号的目标窗口'].isChecked()
 
-    use_window_menu(panel, qapp, lambda: open_header_menu(qapp, tree), inspect_empty)
+    use_window_menu(panel, qapp, lambda: open_window_menu(qapp, tree), inspect_empty)
     panel.undo()
     settle(qapp)
     assert panel.plotted_keys() == keys
@@ -437,7 +447,7 @@ def test_signal_lists_start_at_the_top_without_permanent_window_controls(windows
 
 
 @pytest.mark.parametrize('surface,target', [
-    ('blank', 0), ('empty', 1), ('header', 1), ('plot', 1),
+    ('blank', 0), ('empty', 1), ('header', 0), ('plot', 1),
 ])
 def test_axis_menu_is_available_without_a_signal_at_the_click(windows, qapp, surface, target):
     panel = windows

@@ -396,6 +396,7 @@ def make_list(panel, window, keys, row, last=False):
     layout.setContentsMargins(0, 0, 0, 0)
     layout.setSpacing(0)
     tree = WindowSignals(panel, window)
+    tree.setHeaderHidden(row != 0)
     tree.setFrameShape(QTreeWidget.Shape.NoFrame)
     tree.setMinimumHeight(0)
     tree.blockSignals(True)

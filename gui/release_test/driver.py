@@ -34,7 +34,7 @@ import weakref
 from pathlib import Path
 
 from PySide6.QtCore import QObject, QTimer
-from PySide6.QtWidgets import QApplication, QFileDialog, QMessageBox, QInputDialog
+from PySide6.QtWidgets import QApplication, QFileDialog, QMessageBox, QInputDialog, QToolBar
 from shiboken6 import Shiboken
 
 from core.bus_types import decode_key
@@ -205,6 +205,10 @@ class ScenarioDriver(QObject):
                 yield from self._playback(record)
             elif step['op'] == 'panels':
                 self._panels(record)
+            elif step['op'] == 'assistant_entry':
+                yield from self._assistant_entry(record)
+            elif step['op'] == 'signal_pane_layout':
+                yield from self._signal_pane_layout(record)
             elif step['op'] == 'explorer_hidden_load':
                 yield from self._explorer_hidden_load(record)
             elif step['op'] == 'log_file_operations':
@@ -401,6 +405,80 @@ class ScenarioDriver(QObject):
             row = window.plot_panel._row_lookup[lin_key]
             record['gap_readout'] = window.plot_panel.table.item(row, 2).text().startswith('Stale')
         record['outcome'] = 'observed'
+
+    def _signal_pane_layout(self, record: dict):
+        from PySide6.QtCore import QPoint, Qt
+        from PySide6.QtTest import QTest
+
+        window = self._window
+        panel = window.plot_panel
+        assert window.bottom_dock.isHidden()
+        action = window.bottom_dock.toggleViewAction()
+        assert action in window.tools_menu.actions()
+        action.trigger()
+        assert window.bottom_dock.isVisible()
+        action.trigger()
+        assert window.bottom_dock.isHidden()
+        assert panel._windows_mode
+
+        grip = panel.window_list_grip
+        assert grip.isVisible()
+        first = next(iter(panel._window_widgets.values()))[1]
+        initial = first.width()
+        point = grip.rect().center()
+        QTest.mousePress(grip, Qt.MouseButton.LeftButton, pos=point)
+        QTest.mouseMove(grip, pos=point + QPoint(-64, 0))
+        QTest.mouseRelease(grip, Qt.MouseButton.LeftButton, pos=point)
+        yield from self._wait(.2)
+        assert first.width() == initial - 64
+        panel.new_window()
+        yield from self._wait(.2)
+        widths = [tree.width() for _widget, tree in panel._window_widgets.values()]
+        assert len(widths) > 1 and set(widths) == {initial - 64}
+        first = next(iter(panel._window_widgets.values()))[1]
+        height_grip = panel._window_grips[0]
+        height_grip.dragStarted.emit()
+        height_grip.dragged.emit(-2000)
+        yield from self._wait(.2)
+        thin, tall = panel._window_heights[:2]
+        assert thin == height_grip.THICKNESS and tall > 1600
+        assert first.height() == panel._stacked_plots[0].geometry().height() == thin
+        assert panel._stacked_scroll.verticalScrollBar().maximum() > 0
+        height_grip.dragStarted.emit()
+        height_grip.dragged.emit(50)
+        yield from self._wait(.2)
+        assert first.height() == thin + 50
+        panel.undo()
+        panel.undo()
+        yield from self._wait(.2)
+        record.update(outcome='passed', bottom_hidden_at_start=True,
+                      bottom_tools_toggle=True, signal_list_drag=True,
+                      initial_width=initial, list_widths=widths,
+                      thin_height=thin, tall_height=tall, height_reopened=True)
+
+    def _assistant_entry(self, record: dict):
+        window = self._window
+        action = window._act_assistant
+        toolbar = next((item for item in action.associatedObjects() if isinstance(item, QToolBar)), None)
+        button = toolbar.widgetForAction(action) if toolbar is not None else None
+        record['assistant_visible'] = button is not None and button.isVisible()
+        action.trigger()
+        panel = window.assistant_panel
+        record['assistant_opened'] = window.assistant_dock.isVisible()
+        share = getattr(panel, 'share_btn', None)
+        record['share_visible'] = share is not None and share.isVisible()
+        desktop = panel._desktop
+        if desktop is not None:
+            record['mcp_registered'] = desktop._is_registered(desktop._servers())
+            record['bundled_adapter'] = desktop.mcp_command.is_file()
+            for _ in range(40):
+                if panel._desktop_request is None:
+                    break
+                yield from self._wait(.25)
+            combo = panel.codex_project_combo
+            record['codex_projects'] = [combo.itemText(index) for index in range(combo.count())]
+            record['desktop_only'] = not hasattr(panel, 'agent_btn') and not hasattr(panel, 'login_btn')
+        record['outcome'] = 'assistant entry checked'
 
     def _panels(self, record: dict):
         window = self._window

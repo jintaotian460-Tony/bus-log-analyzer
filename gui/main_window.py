@@ -611,6 +611,27 @@ class MainWindow(QMainWindow):
         self.addDockWidget(Qt.DockWidgetArea.BottomDockWidgetArea, self.bottom_dock)
 
         self.resizeDocks([self.bottom_dock], [180], Qt.Orientation.Vertical)
+        self.bottom_dock.hide()
+
+        # The analysis assistant: hidden until asked for, so the plot keeps
+        # its width. Right area beside the (floating) Signals window.
+        from gui.assistant import AssistantPanel
+        self.assistant_panel = AssistantPanel(project_home=app_data.per_user_folder())
+        self.assistant_dock = QDockWidget('分析助手', self)
+        self.assistant_dock.setObjectName('AssistantDock')
+        self.assistant_dock.setAllowedAreas(
+            Qt.DockWidgetArea.LeftDockWidgetArea | Qt.DockWidgetArea.RightDockWidgetArea
+        )
+        self.assistant_dock.setWidget(self.assistant_panel)
+        self.addDockWidget(Qt.DockWidgetArea.RightDockWidgetArea,
+                           self.assistant_dock)
+        self.assistant_dock.hide()
+        self.assistant_panel.recaptureRequested.connect(self._assistant_recapture)
+        self.assistant_panel.evidenceActivated.connect(
+            self._assistant_locate_evidence)
+        self.assistant_panel.shareRequested.connect(self._assistant_share)
+        # First show of a session starts from what is on screen right now.
+        self.assistant_dock.visibilityChanged.connect(self._assistant_first_show)
 
         left_title = QWidget()
         left_title_layout = QHBoxLayout(left_title)
@@ -763,12 +784,18 @@ class MainWindow(QMainWindow):
         self._act_explorer = self.left_dock.toggleViewAction()
         self._act_explorer.setText('Log Explorer')
         toolbar.addAction(self._act_explorer)
+        self._act_assistant = self.assistant_dock.toggleViewAction()
+        self._act_assistant.setText('Assistant')
+        self._act_assistant.setToolTip(
+            '打开分析助手：捕获当前信号与时间范围，本地分析并把证据定位回波形')
+        toolbar.addAction(self._act_assistant)
         save_blf = QAction('Save playback BLF…', self)
         save_blf.triggered.connect(self.save_playback_blf)
         self.file_menu.addAction(save_blf)
         # Jobs on files that need not be open.
         self.tools_menu = ToolsMenu(self)
         self.tools_menu.convert_action.triggered.connect(self.show_converter)
+        self.tools_menu.addAction(self.bottom_dock.toggleViewAction())
         self._add_menu_button(toolbar, self.tools_menu)
         toolbar.addSeparator()
 
@@ -1458,6 +1485,9 @@ class MainWindow(QMainWindow):
 
     def _release_store(self) -> None:
         """Drop the decoded measurement and close the file its signals read."""
+        panel = getattr(self, 'assistant_panel', None)
+        if panel is not None:
+            panel.invalidate_context('测量已切换')
         self.playback.clear()
         self.plot_panel._playback_readout = False
         self.plot_panel.set_gap_timeout(0)
@@ -3019,6 +3049,62 @@ class MainWindow(QMainWindow):
             dmin, dmax = self._store_time_bounds()
             self.plot_panel.center_on_time(t0, half, data_min=dmin, data_max=dmax)
 
+    # ── Analysis assistant ────────────────────────────────────────────────
+
+    def _assistant_first_show(self, visible: bool) -> None:
+        if visible and not self._closing:
+            self.assistant_panel.refresh_codex_projects()
+            if not self.assistant_panel.is_running() and self.assistant_panel.context() is None:
+                self._assistant_recapture()
+
+    def _assistant_recapture(self) -> None:
+        from gui.assistant import capture_context
+        self.assistant_panel.revoke_shared()
+        context = capture_context(self)
+        self.assistant_panel.set_context(context)
+        # Capture is the whole gesture: snapshot, freeze, analyse.
+        if self.store is not None and context.keys:
+            self.assistant_panel.start_analysis(self.store)
+
+    def _assistant_locate_evidence(self, evidence) -> None:
+        """Zoom the plot onto one piece of assistant evidence; plot its
+        signal again if the user removed it since the analysis."""
+        from core.assistant_analysis import Evidence, measurement_source_id
+        if (not isinstance(evidence, Evidence) or self.store is None
+                or evidence.source_id != measurement_source_id(self.store)):
+            return
+        if evidence.key and evidence.key not in self.plot_panel.plotted_keys():
+            self.add_signals_to_plot([evidence.key])
+        span = abs(evidence.t1 - evidence.t0)
+        half = max(span * 0.75, 0.5)
+        dmin, dmax = self._store_time_bounds()
+        self.plot_panel.center_on_time(
+            (evidence.t0 + evidence.t1) / 2.0, half,
+            data_min=dmin, data_max=dmax)
+
+    def _assistant_share(self, question: str, project) -> None:
+        """Freeze only the currently approved signal and time scope."""
+        from core.assistant_analysis import capture_snapshot, measurement_source_id
+        panel = self.assistant_panel
+        store = self.store
+        if store is None:
+            panel.codex_status('当前没有已解码的测量数据。')
+            return
+        context = panel.context()
+        if (context is None or not context.keys
+                or context.source_id != measurement_source_id(store)):
+            panel.invalidate_context('采集范围不可用')
+            return
+
+        def resolver(key):
+            try:
+                return self._resolve_source_series([key]).get(key)
+            except CalculatedSignalError:
+                return None
+
+        snapshot = capture_snapshot(store, context, resolver=resolver)
+        panel.begin_shared(snapshot, question, project)
+
     # Export formats, in the order shown in the picker. Add a new format by
     # appending one (label, file_filter, default_ext, handler) entry — the
     # handler returns True if a file was written, False if the user backed out.
@@ -3639,6 +3725,7 @@ class MainWindow(QMainWindow):
             event.ignore()
             return
         self.playback.pause()
+        self.assistant_panel.shutdown(wait_ms=0)
         self.log_explorer.cancel_file_operation()
         # Every worker thread is a child of this window, and Qt terminates the
         # application when one is destroyed while it runs. None can be

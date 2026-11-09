@@ -6,7 +6,7 @@ from PySide6.QtCore import Qt, QRectF, QMimeData, QPoint, QPointF, QTimer
 from PySide6.QtGui import QActionGroup, QColor, QBrush, QDrag, QPainter, QPen
 from PySide6.QtWidgets import (QWidget, QVBoxLayout, QTreeWidget, QTreeWidgetItem,
                               QGraphicsProxyWidget, QGraphicsWidget, QMenu, QInputDialog,
-                              QAbstractItemView, QHeaderView)
+                              QAbstractItemView, QHeaderView, QSizePolicy)
 
 from gui.signal_tree import SignalTreeWidget
 from gui.edge_tab import EdgeTab
@@ -14,7 +14,8 @@ from gui.time_axis import TimePan
 from gui import observation_style
 
 
-MIN_WINDOW_HEIGHT = 120
+MIN_WINDOW_HEIGHT = 120  # Default for automatically sized rows.
+QT_MAX_WIDGET_HEIGHT = 16777215
 RULER_HEIGHT = 30
 
 
@@ -25,7 +26,7 @@ class TimelineRuler(QWidget):
         self.panel = panel
         self._pan = None
         self.setCursor(Qt.CursorShape.SizeHorCursor)
-        self.setToolTip('按住鼠标左键左右拖动刻度尺，所有窗口同步平移时间轴；滚轮缩放。')
+        self.setToolTip('按住鼠标左键左右拖动刻度尺，所有窗口同步平移时间轴；滚轮以鼠标位置为中心缩放。')
         self.setFixedHeight(RULER_HEIGHT)
         self.hide()
 
@@ -58,7 +59,17 @@ class TimelineRuler(QWidget):
         painter.drawText(QRectF(2, 10, max(0, left-8), 17), Qt.AlignmentFlag.AlignRight, 't / s')
 
     def wheelEvent(self, event):
-        self.panel._driving_vb().scaleBy(x=.8 if event.angleDelta().y() > 0 else 1.25)
+        delta = event.angleDelta().y()
+        if not delta:
+            event.ignore()
+            return
+        view = self.panel._driving_vb()
+        graph = self.panel.glw
+        pointer = graph.viewport().mapFromGlobal(self.mapToGlobal(event.position()))
+        scene = graph.viewportTransform().inverted()[0].map(pointer)
+        low, high = view.viewRange()[0]
+        anchor = max(low, min(high, view.mapSceneToView(scene).x()))
+        view.scaleBy(x=.8 if delta > 0 else 1.25, center=(anchor, 0))
         event.accept()
 
     def mousePressEvent(self, event):
@@ -89,7 +100,7 @@ class TimelineRuler(QWidget):
 
 
 class HeightGrip(EdgeTab):
-    """Resize the two neighbours, keeping their combined height unchanged."""
+    """Resize neighbours and extend the scroll area after one reaches the handle."""
     def __init__(self, panel, index):
         super().__init__(Qt.Orientation.Horizontal, panel.glw.viewport())
         self.panel, self.index = panel, index
@@ -106,14 +117,46 @@ class HeightGrip(EdgeTab):
         if not hasattr(self, 'heights') or index+1 >= len(panel._window_specs):
             return
         first, second = self.heights[index:index+2]
-        delta = max(MIN_WINDOW_HEIGHT-first, min(second-MIN_WINDOW_HEIGHT, round(delta)))
+        delta = round(delta)
         heights = list(self.heights)
-        heights[index], heights[index+1] = first+delta, second-delta
-        # Heights double as proportional weights in the template schema.
-        scale = min(1., 1600/max(heights))
+        heights[index] = max(self.THICKNESS, first + delta)
+        heights[index+1] = max(self.THICKNESS, second - delta)
         for window, height in zip(panel._window_specs, heights):
-            window['height'] = max(MIN_WINDOW_HEIGHT, round(height*scale))
+            window['height'] = height
+        for window in panel._window_specs[index:index+2]:
+            window['height_is_manual'] = True
         arrange(panel)
+
+
+class ListWidthGrip(EdgeTab):
+    """Resize the shared signal-list column without rebuilding any plots."""
+
+    MIN_WIDTH = 200
+    MIN_PLOT_WIDTH = 240
+
+    def __init__(self, panel):
+        super().__init__(Qt.Orientation.Vertical, panel._stacked_scroll.viewport())
+        self.panel = panel
+        self.preferred_width = observation_style.LIST_WIDTH
+        self._start_width = self.preferred_width
+        self.setToolTip('左右拖动，调整信号列表宽度')
+        self.setAccessibleName('调整信号列表宽度')
+        self.dragStarted.connect(self._begin_resize)
+        self.dragged.connect(self._resize_list)
+        self.hide()
+
+    def column_width(self, width=None):
+        available = self.parentWidget().width()
+        maximum = max(self.MIN_WIDTH, available - self.MIN_PLOT_WIDTH)
+        return max(self.MIN_WIDTH, min(maximum, self.preferred_width if width is None else width))
+
+    def _begin_resize(self):
+        layout = self.panel.glw.ci.layout
+        self._start_width = round(layout.columnMinimumWidth(0))
+
+    def _resize_list(self, delta):
+        self.preferred_width = self.column_width(self._start_width + round(delta))
+        arrange(self.panel)
 
 
 class WindowSignals(QTreeWidget):
@@ -398,7 +441,10 @@ def make_list(panel, window, keys, row, last=False):
     tree = WindowSignals(panel, window)
     tree.setHeaderHidden(row != 0)
     tree.setFrameShape(QTreeWidget.Shape.NoFrame)
-    tree.setMinimumHeight(0)
+    # A short row clips the tree content while keeping the graph and list aligned.
+    policy = tree.sizePolicy()
+    policy.setVerticalPolicy(QSizePolicy.Policy.Ignored)
+    tree.setSizePolicy(policy)
     tree.blockSignals(True)
     for key in keys:
         plotted = panel._items[key]
@@ -424,7 +470,6 @@ def make_list(panel, window, keys, row, last=False):
     # real, interactive tree all the way down to the cursor/file information.
     panel.glw.addItem(proxy, row=row, col=0, rowspan=2 if last else 1)
     panel._window_widgets[window['id']] = (widget, tree)
-    panel.glw.ci.layout.setColumnFixedWidth(0, observation_style.LIST_WIDTH)
 
 
 def finish_rows(panel):
@@ -435,6 +480,7 @@ def finish_rows(panel):
 
 
 def clear_renderers(panel):
+    panel.window_list_grip.hide()
     panel.glw.setMinimumHeight(0)
     for grip in panel._window_grips:
         grip.hide()
@@ -446,7 +492,7 @@ def clear_renderers(panel):
     panel._window_time_hooks.clear()
     for row in range(len(panel._window_widgets)+1):
         panel.glw.ci.layout.setRowMinimumHeight(row, 0)
-        panel.glw.ci.layout.setRowMaximumHeight(row, 16777215)
+        panel.glw.ci.layout.setRowMaximumHeight(row, QT_MAX_WIDGET_HEIGHT)
         panel.glw.ci.layout.setRowPreferredHeight(row, -1)
         panel.glw.ci.layout.setRowStretchFactor(row, 1)
     panel.glw.ci.layout.setColumnMinimumWidth(0, 0)
@@ -531,17 +577,19 @@ def link_times(panel):
         panel._window_time_hooks.append((view, changed))
 
 
-def fitted_heights(weights, available):
-    """Proportional allocation with a lower bound and no rounding remainder."""
+def fitted_heights(weights, available, minimums=None):
+    """Proportional allocation with per-row minimums and exact total height."""
     if not weights:
         return []
-    total = max(round(available), len(weights)*MIN_WINDOW_HEIGHT)
+    if minimums is None:
+        minimums = [MIN_WINDOW_HEIGHT]*len(weights)
+    total = max(round(available), sum(minimums))
     free, remaining = set(range(len(weights))), total
     result = [0]*len(weights)
     while free:
         weight_sum = sum(weights[index] for index in free)
         small = [index for index in free
-                 if remaining*weights[index]/weight_sum < MIN_WINDOW_HEIGHT]
+                 if remaining*weights[index]/weight_sum < minimums[index]]
         if not small:
             exact = {index: remaining*weights[index]/weight_sum for index in free}
             for index in free:
@@ -551,9 +599,9 @@ def fitted_heights(weights, available):
                 result[index] += 1
             break
         for index in small:
-            result[index] = MIN_WINDOW_HEIGHT
+            result[index] = minimums[index]
             free.remove(index)
-            remaining -= MIN_WINDOW_HEIGHT
+            remaining -= minimums[index]
     return result
 
 
@@ -581,6 +629,11 @@ def position_ruler(panel):
     edge = panel.glw.mapFromScene(QPointF(proxy.sceneBoundingRect().right(), 0))
     left = viewport.mapFromGlobal(panel.glw.viewport().mapToGlobal(edge)).x()
     left = max(0, min(viewport.width(), left))
+    grip = panel.window_list_grip
+    grip.setGeometry(left - grip.THICKNESS//2, 0, grip.THICKNESS,
+                     max(0, viewport.height() - RULER_HEIGHT))
+    grip.raise_()
+    grip.show()
     panel.window_ruler.setGeometry(left, viewport.height()-RULER_HEIGHT,
                                    viewport.width()-left, RULER_HEIGHT)
     panel.window_ruler.raise_()
@@ -600,8 +653,14 @@ def arrange(panel):
             return
         layout.setContentsMargins(0, 0, 0, 0)
         layout.setSpacing(0)
-        heights = fitted_heights([window['height'] for window in panel._window_specs],
-                                 panel._stacked_scroll.viewport().height()-RULER_HEIGHT)
+        layout.setColumnFixedWidth(0, panel.window_list_grip.column_width())
+        weights = [window['height'] for window in panel._window_specs]
+        manual = [window.get('height_is_manual', False) for window in panel._window_specs]
+        minimums = [EdgeTab.THICKNESS if adjusted else MIN_WINDOW_HEIGHT for adjusted in manual]
+        available = panel._stacked_scroll.viewport().height() - RULER_HEIGHT
+        if any(manual):
+            available = max(available, min(sum(weights), QT_MAX_WIDGET_HEIGHT - RULER_HEIGHT))
+        heights = fitted_heights(weights, available, minimums)
         panel._window_heights = heights
         panel.glw.setMinimumHeight(sum(heights)+RULER_HEIGHT)
         for row, height in enumerate(heights):
@@ -617,19 +676,29 @@ def arrange(panel):
 
 
 def refresh_values(panel):
-    for _widget, tree in panel._window_widgets.values():
-        tree.setColumnHidden(1, not panel._cursor1_enabled)
-        tree.setColumnHidden(2, not panel._cursor2_enabled)
-        for key, item in tree.rows.items():
-            row = panel._row_lookup.get(key)
-            if row is None:
+    cursors = ((1, panel._cursor1_enabled, panel.v_line),
+               (2, panel._cursor2_enabled, panel.v_line2))
+    for widget, tree in panel._window_widgets.values():
+        repaint = False
+        for column, enabled, line in cursors:
+            if tree.isColumnHidden(column) == enabled:
+                tree.setColumnHidden(column, not enabled)
+                repaint = True
+            if not enabled:
                 continue
-            for column in (1, 2):
-                cell = panel.table.item(row, column+1)
-                item.setText(column, cell.text() if cell else '')
-                item.setToolTip(column, cell.toolTip() if cell else '')
-        for column, line in ((1, panel.v_line), (2, panel.v_line2)):
             tree.headerItem().setToolTip(column, f'C{column}  t = {line.value():.6f} s')
+            for key, item in tree.rows.items():
+                row = panel._row_lookup.get(key)
+                cell = panel.table.item(row, column+1) if row is not None else None
+                text = cell.text() if cell is not None else ''
+                if item.text(column) != text:
+                    item.setText(column, text)
+                    repaint = True
+                item.setToolTip(column, cell.toolTip() if cell is not None else '')
+        if repaint:
+            # The view may only repaint the cursor lines or upper trees on its
+            # own. Invalidate the embedded list at its actual scene position.
+            widget.graphicsProxyWidget().update()
 
 
 def refresh_signal_style(panel, key):
@@ -672,7 +741,11 @@ def snapshot(panel):
 
 def apply_layout(panel, windows, mapping=None):
     mapping = mapping or {}
-    panel._window_specs = [{k: deepcopy(window[k]) for k in ('id', 'name', 'axis_mode', 'height')} for window in windows]
+    panel._window_specs = [
+        {key: deepcopy(window[key]) for key in ('id', 'name', 'axis_mode', 'height', 'height_is_manual')
+         if key in window}
+        for window in windows
+    ]
     panel._window_y_restore = {}
     for window in windows:
         for old_key in window['keys']:

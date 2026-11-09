@@ -70,7 +70,8 @@ def _row(window):
 
 def test_the_row_reads_in_the_order_of_the_work(window):
     assert _row(window) == ['File', '|', 'Open Measurement', 'Databases', 'Decode', '|',
-                            'Calculated Signal', 'Trace', 'Signals', 'Log Explorer', 'Tools', '|', 'Help']
+                            'Calculated Signal', 'Trace', 'Signals', 'Log Explorer',
+                            'Assistant', 'Tools', '|', 'Help']
 
 
 def test_the_file_menu_holds_what_is_done_now_and_then(window):

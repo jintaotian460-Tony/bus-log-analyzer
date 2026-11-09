@@ -62,7 +62,8 @@ def _executable_folder() -> Path:
     return Path(__file__).resolve().parents[1]
 
 
-def _per_user_folder() -> Path:
+def per_user_folder() -> Path:
+    """Per-user data path, including for features run from a source checkout."""
     if os.environ.get(DATA_DIR_ENV_VAR):
         return Path(os.environ[DATA_DIR_ENV_VAR])
     local = os.environ.get('LOCALAPPDATA')
@@ -77,7 +78,7 @@ def folder() -> Path:
     """
     if not getattr(sys, 'frozen', False) and not os.environ.get(DATA_DIR_ENV_VAR):
         return _executable_folder()
-    path = _per_user_folder()
+    path = per_user_folder()
     # The logs folder marks the first start, not the folder itself: the
     # licence and add-on folders sit in it too, made by whichever came first.
     if not (path / _LOGS).is_dir():

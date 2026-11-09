@@ -90,6 +90,8 @@ def window(qapp, monkeypatch, tmp_path):
 @pytest.mark.parametrize('name', ['left', 'bottom'])
 def test_click_does_not_collapse_drag_does_not_toggle_and_double_click_reopens(qapp, window, name):
     tab, dock = getattr(window, name+'_edge_btn'), getattr(window, name+'_dock')
+    dock.show()
+    settle(qapp)
     QTest.mouseClick(tab, Qt.MouseButton.LeftButton)
     settle(qapp)
     assert dock.isVisible()
@@ -114,6 +116,8 @@ def test_click_does_not_collapse_drag_does_not_toggle_and_double_click_reopens(q
 def test_boundary_drags_resize_docks_and_keep_plot_tiled(qapp, window, name, delta):
     from tests.test_plot_windows import assert_tiles
     tab, dock = getattr(window, name+'_edge_btn'), getattr(window, name+'_dock')
+    dock.show()
+    settle(qapp)
     before = dock.width() if name == 'left' else dock.height()
     drag(tab, dx=delta if name == 'left' else 0, dy=delta if name == 'bottom' else 0)
     settle(qapp)
@@ -125,7 +129,7 @@ def test_boundary_drags_resize_docks_and_keep_plot_tiled(qapp, window, name, del
 @pytest.mark.parametrize('name', ['left', 'bottom'])
 def test_hidden_panel_can_be_dragged_open_from_its_edge(qapp, window, name):
     tab, dock = getattr(window, name+'_edge_btn'), getattr(window, name+'_dock')
-    QTest.mouseDClick(tab, Qt.MouseButton.LeftButton)
+    dock.hide()
     settle(qapp)
     assert not dock.isVisible()
     drag(tab, dx=220 if name == 'left' else 0, dy=-200 if name == 'bottom' else 0)
@@ -134,7 +138,22 @@ def test_hidden_panel_can_be_dragged_open_from_its_edge(qapp, window, name):
     assert not dock.isFloating()
 
 
+def test_bottom_panel_is_hidden_at_start_and_can_be_reopened_from_tools(qapp, window):
+    assert window.bottom_dock.isHidden()
+    assert window.bottom_edge_btn.isVisible()
+    action = window.bottom_dock.toggleViewAction()
+    assert action in window.tools_menu.actions()
+    action.trigger()
+    settle(qapp)
+    assert window.bottom_dock.isVisible()
+    action.trigger()
+    settle(qapp)
+    assert window.bottom_dock.isHidden()
+
+
 def test_content_touches_dock_boundaries_without_extra_margins(qapp, window):
+    window.bottom_dock.show()
+    settle(qapp)
     central = window.centralWidget().geometry()
     assert central.left()-window.left_dock.geometry().right()-1 == 1
     assert window.bottom_dock.geometry().top()-central.bottom()-1 == 1
@@ -152,6 +171,7 @@ def test_content_touches_dock_boundaries_without_extra_margins(qapp, window):
 def test_opposite_dock_edges_reverse_drag_direction(qapp, window, name, area, delta):
     tab, dock = getattr(window, name+'_edge_btn'), getattr(window, name+'_dock')
     window.addDockWidget(area, dock)
+    dock.show()
     settle(qapp)
     window._sync_panel_toggle_buttons()
     before = dock.width() if name == 'left' else dock.height()

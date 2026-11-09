@@ -210,9 +210,27 @@ memcheck_exe = EXE(
     icon=str(project_root / 'resources' / 'app_icon.ico'),
 )
 
+# Desktop launches the MCP adapter over stdin/stdout. Package a small
+# console entry point separately from the windowed Qt application.
+capture = Analysis(
+    [str(project_root / "tools" / "osvanta_capture_mcp.py")],
+    pathex=[str(project_root)],
+)
+capture_exe = EXE(
+    PYZ(capture.pure),
+    capture.scripts,
+    capture.binaries,
+    capture.datas,
+    [],
+    name="OsvantaCaptureMCP",
+    console=True,
+    upx=False,
+)
+
 coll = COLLECT(
     exe,
     memcheck_exe,
+    capture_exe,
     a.binaries,
     a.zipfiles,
     a.datas,
@@ -222,7 +240,7 @@ coll = COLLECT(
     name="BusLogAnalyzer",
 )
 
-# A README beside the two executables, where the user sees it. Data files go
+# A README beside the executables, where the user sees it. Data files go
 # into _internal, so it is copied after the folder is assembled.
 _install_dir = Path(coll.name)
 shutil.copyfile(project_root / "resources" / "release_readme.txt",

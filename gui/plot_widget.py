@@ -1276,6 +1276,7 @@ class PlotPanel(QWidget):
         self._table_view_width = 0                   # the user's last width for it
         _root.addWidget(self.area_stack, stretch=1)
         self.window_ruler = plot_windows.TimelineRuler(self)
+        self.window_list_grip = plot_windows.ListWidthGrip(self)
         # The cursor line keeps a line's height under the empty plot, but no
         # width. Plotting the first signals then resizes neither the plot nor
         # the table beside it, which would draw every stacked row once more.
@@ -3622,6 +3623,8 @@ class PlotPanel(QWidget):
             hidden = not (self._column_choices[name] and self._column_available(name))
             for col in columns:
                 self.table.setColumnHidden(col, hidden)
+        if self._windows_mode:
+            plot_windows.refresh_values(self)
 
     def _show_table_header_menu(self, position) -> None:
         self._table_header_menu().exec(self.table.horizontalHeader().mapToGlobal(position))

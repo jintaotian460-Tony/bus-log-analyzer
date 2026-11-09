@@ -40,8 +40,12 @@ def normalise_windows(windows):
         if window.get('axis_mode') not in {'shared', 'individual'} or not isinstance(window.get('name'), str):
             raise ValueError('Invalid window name or axis mode')
         height = window.get('height', 220)
-        if not isinstance(height, (int, float)) or not math.isfinite(height) or not 120 <= height <= 1600:
+        if (type(height) not in (int, float) or height < 1
+                or (isinstance(height, float) and not math.isfinite(height))):
             raise ValueError('Invalid window height')
+        manual_height = window.get('height_is_manual', False)
+        if not isinstance(manual_height, bool):
+            raise ValueError('Invalid manual window height flag')
         keys = window.get('keys', [])
         if not isinstance(keys, list) or any(not isinstance(key, str) or key in assigned for key in keys) or len(keys) != len(set(keys)):
             raise ValueError('A plotted signal must belong to one window')
@@ -54,6 +58,8 @@ def normalise_windows(windows):
                 ranges[key] = list(bounds)
         result.append(dict(id=identifier, name=window['name'], axis_mode=window['axis_mode'],
                            height=int(height), keys=list(keys), y_ranges=ranges))
+        if manual_height:
+            result[-1]['height_is_manual'] = True
     return result
 
 

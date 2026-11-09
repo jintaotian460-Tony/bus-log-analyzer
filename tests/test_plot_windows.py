@@ -24,6 +24,93 @@ def windows(qapp):
     qapp.processEvents()
 
 
+def test_list_divider_drags_all_signal_lists_and_tracks_the_ruler(windows, qapp):
+    from PySide6.QtCore import QPoint
+    from tests.test_edge_tab import drag
+
+    panel = windows
+    grip = panel.window_list_grip
+    settle(qapp)
+    assert grip.isVisible()
+    empty_list = panel._window_widgets[0][1]
+    initial = empty_list.width()
+    drag(grip, dx=-72)
+    settle(qapp)
+    assert empty_list.width() == initial - 72
+
+    for index in range(3):
+        if index:
+            panel.new_window()
+        signal = series(f'WidthTest_{index}')
+        panel.add_series(signal.key, signal)
+    settle(qapp)
+    trees = [tree for _widget, tree in panel._window_widgets.values()]
+    assert {tree.width() for tree in trees} == {initial - 72}
+    drag(grip, dx=104)
+    settle(qapp)
+    assert {tree.width() for tree in trees} == {initial + 32}
+    assert all(tree.topLevelItemCount() == 1 for tree in trees)
+    edge = trees[0].mapToGlobal(QPoint(trees[0].width(), 0)).x()
+    assert abs(grip.mapToGlobal(QPoint(grip.THICKNESS//2, 0)).x() - edge) <= 1
+    assert abs(panel.window_ruler.mapToGlobal(QPoint()).x() - edge) <= 1
+
+    drag(grip, dx=-3000)
+    settle(qapp)
+    assert {tree.width() for tree in trees} == {grip.MIN_WIDTH}
+    panel.set_stacked(True)
+    settle(qapp)
+    assert grip.isHidden()
+    panel.set_windows(True)
+    settle(qapp)
+    assert {tree.width() for _widget, tree in panel._window_widgets.values()} == {grip.MIN_WIDTH}
+
+
+@pytest.mark.parametrize(('fraction', 'delta', 'factor'), [(.2, 120, .8), (.75, -120, 1.25)])
+def test_timeline_wheel_anchors_time_under_the_pointer(windows, qapp, fraction, delta, factor):
+    from PySide6.QtCore import QPoint, Qt
+    from PySide6.QtGui import QWheelEvent
+    from tests.test_edge_tab import drag
+
+    panel = windows
+    for index in range(2):
+        if index:
+            panel.new_window()
+        signal = series(f'ZoomTest_{index}', value=index + 1)
+        panel.add_series(signal.key, signal)
+    settle(qapp)
+    drag(panel.window_list_grip, dx=72)
+    settle(qapp)
+
+    ruler = panel.window_ruler
+    graph = panel.glw
+    view = panel._driving_vb()
+    view.setXRange(20, 100, padding=0)
+    settle(qapp)
+    y_ranges = [plot.vb.viewRange()[1] for plot in panel._stacked_plots]
+    anchor = 20 + 80 * fraction
+
+    def pointer_x():
+        scene = view.mapViewToScene(QPointF(anchor, 0))
+        viewport = graph.viewportTransform().map(scene)
+        return ruler.mapFromGlobal(graph.viewport().mapToGlobal(viewport)).x()
+
+    position = QPointF(pointer_x(), 18)
+    assert ruler.rect().contains(position.toPoint())
+    event = QWheelEvent(position, ruler.mapToGlobal(position), QPoint(), QPoint(0, delta),
+                        Qt.MouseButton.NoButton, Qt.KeyboardModifier.NoModifier,
+                        Qt.ScrollPhase.NoScrollPhase, False)
+    qapp.sendEvent(ruler, event)
+    settle(qapp)
+
+    assert event.isAccepted()
+    assert pointer_x() == pytest.approx(position.x(), abs=.01)
+    bounds = [anchor + (edge - anchor) * factor for edge in (20, 100)]
+    for plot, y_range in zip(panel._stacked_plots, y_ranges):
+        x, y = plot.vb.viewRange()
+        assert x == pytest.approx(bounds)
+        assert y == pytest.approx(y_range)
+
+
 def test_each_window_has_its_own_list_and_one_source_of_data(windows, qapp):
     panel = windows
     assert panel.table_panel.isHidden()
@@ -122,6 +209,66 @@ def test_x_range_cursors_and_readouts_follow_in_both_directions(windows, qapp):
     assert panel._stacked_c2_lines[1].value() == pytest.approx(3.5)
     assert panel._window_widgets[0][1].rows[a.key].text(1) == '30.000'
     assert panel._window_widgets[1][1].rows[b.key].text(2) == '35.000'
+
+
+@pytest.mark.parametrize('column', [1, 2])
+def test_cursor_move_repaints_every_embedded_signal_list(windows, qapp, column):
+    from PySide6.QtWidgets import QStyledItemDelegate
+
+    class PaintedReadout(QStyledItemDelegate):
+        value = None
+
+        def paint(self, painter, option, index):
+            if index.column() == column:
+                self.value = index.data()
+            super().paint(painter, option, index)
+
+    panel = windows
+    for index in range(5):
+        if index:
+            panel.new_window()
+        signal = series(f'Readout_{index}', value=index+1)
+        panel.add_series(signal.key, signal)
+    panel.set_cursor1_enabled(True)
+    panel.set_cursor2_enabled(True)
+    move = panel.move_cursor1 if column == 1 else panel.move_cursor2
+    lines = panel._stacked_c1_lines if column == 1 else panel._stacked_c2_lines
+    move(2)
+    settle(qapp)
+
+    delegates = []
+    for _, tree in panel._window_widgets.values():
+        delegate = PaintedReadout(tree)
+        tree.setItemDelegate(delegate)
+        delegates.append(delegate)
+    panel.glw.viewport().update()
+    settle(qapp)
+    assert [delegate.value for delegate in delegates] == [f'{20*i:.3f}' for i in range(1, 6)]
+
+    move(5)
+    settle(qapp)
+    assert [delegate.value for delegate in delegates] == [f'{50*i:.3f}' for i in range(1, 6)]
+    lines[3].setPos(8)
+    settle(qapp)
+    assert [delegate.value for delegate in delegates] == [f'{80*i:.3f}' for i in range(1, 6)]
+
+
+@pytest.mark.parametrize('column', [1, 2])
+def test_cursor_toggle_hides_its_readouts_without_another_move(windows, qapp, column):
+    panel = windows
+    a, b = series('A'), series('B')
+    panel.add_series(a.key, a)
+    panel.new_window()
+    panel.add_series(b.key, b)
+    panel.set_cursor1_enabled(True)
+    panel.set_cursor2_enabled(True)
+    settle(qapp)
+    toggle = panel.set_cursor1_enabled if column == 1 else panel.set_cursor2_enabled
+    toggle(False)
+    settle(qapp)
+    for _, tree in panel._window_widgets.values():
+        assert tree.isColumnHidden(column)
+        assert not tree.isColumnHidden(3-column)
 
 
 def test_whole_window_axes_switch_and_y_ranges_are_independent(windows, qapp):
@@ -336,6 +483,58 @@ def test_divider_drag_changes_only_neighbours_and_undo_restores(windows, qapp):
     panel.undo()
     settle(qapp)
     assert [spec['height'] for spec in panel._window_specs] == saved
+    assert_tiles(panel)
+
+
+@pytest.mark.parametrize('direction', [-1, 1])
+def test_height_drag_allows_thin_and_scrollable_rows_and_restores_layout(windows, qapp, direction):
+    from core.analysis_templates import normalise_windows
+    from tests.test_edge_tab import drag
+
+    panel = windows
+    for index in range(3):
+        if index:
+            panel.new_window()
+        signal = series(f'HeightTest_{index}')
+        panel.add_series(signal.key, signal)
+    settle(qapp)
+    before = panel._window_heights[:]
+    grip = panel._window_grips[0]
+    thin, tall = (0, 1) if direction < 0 else (1, 0)
+
+    drag(grip, dy=direction*2000)
+    settle(qapp)
+    assert panel._window_heights[thin] == grip.THICKNESS
+    assert panel._window_heights[tall] == before[tall] + 2000
+    assert panel._window_heights[2] == before[2]
+    assert panel._stacked_scroll.verticalScrollBar().maximum() > 0
+    for index in (thin, tall):
+        widget, tree = panel._window_widgets[index]
+        plot = panel._stacked_plots[index]
+        proxy = widget.graphicsProxyWidget()
+        assert proxy.geometry().top() == pytest.approx(plot.geometry().top(), abs=.01)
+        assert tree.height() == widget.height() == panel._window_heights[index]
+        assert plot.geometry().height() == panel._window_heights[index]
+    assert_tiles(panel)
+
+    saved = normalise_windows(panel.window_layout())
+    panel.undo()
+    settle(qapp)
+    assert panel._window_heights == before
+    panel.apply_window_layout(saved)
+    settle(qapp)
+    assert panel._window_heights == [window['height'] for window in saved]
+
+    bar = panel._stacked_scroll.verticalScrollBar()
+    grip = panel._window_grips[0]
+    bar.setValue(max(0, grip.y() - panel._stacked_scroll.viewport().height()//2))
+    settle(qapp)
+    assert panel._stacked_scroll.viewport().rect().contains(
+        grip.mapTo(panel._stacked_scroll.viewport(), grip.rect().center()))
+    drag(grip, dy=-direction*50)
+    settle(qapp)
+    assert panel._window_heights[thin] == grip.THICKNESS + 50
+    assert panel._window_heights[tall] == before[tall] + 1950
     assert_tiles(panel)
 
 
